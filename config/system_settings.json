@@ -1,0 +1,29 @@
+{
+  "_comment": "System configuration file. Edit this file to change settings.",
+  "paths": {
+    "upload_dir": "uploads",
+    "output_dir": "output",
+    "temp_dir": "temp_videos",
+    "log_dir": "logs"
+  },
+  "models": {
+    "detector_model": "yolo11n.pt",
+    "classifier_model": "models/prepare_dataset.pt",
+    "reid_model_path": "osnet_x0_25_msmt17.pt"
+  },
+  "detection": {
+    "detection_confidence": 0.5,
+    "iou_threshold": 0.45,
+    "detection_enabled": true
+  },
+  "tracking": {
+    "max_tracks": 50,
+    "frame_skip": 2,
+    "classification_enabled": true
+  },
+  "system": {
+    "device": "cuda",
+    "batch_size": 32,
+    "num_workers": 4
+  }
+}

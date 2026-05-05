@@ -1,0 +1,9 @@
+opencv-python
+ultralytics
+psycopg2-binary
+minio
+python-dotenv
+numpy
+fastapi
+uvicorn
+pydantic

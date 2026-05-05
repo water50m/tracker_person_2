@@ -1,0 +1,116 @@
+"""
+Docker Compose for Staging Deployment
+
+Usage:
+    cd deploy/staging
+    docker-compose up -d
+
+Features:
+- FastAPI application with refactored AI Processor
+- PostgreSQL for database
+- MinIO for object storage
+- Redis for progress tracking (optional)
+"""
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/staging/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      # Database
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=tracking_staging
+      - DB_USER=postgres
+      - DB_PASS=staging_password
+      # MinIO
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=staging_minio
+      - MINIO_SECRET_KEY=staging_secret_key
+      - MINIO_BUCKET=tracking-images-staging
+      - MINIO_SECURE=false
+      - MINIO_BASE_URL=http://localhost:9000/tracking-images-staging
+      # Feature Flags (Start with original implementation)
+      - USE_REFACTORED_IMAGE_ANALYZER=false
+      - USE_REFACTORED_VIDEO_PROCESSOR=false
+      - USE_REFACTORED_STREAM_PROCESSOR=false
+      # Environment
+      - ENVIRONMENT=staging
+      - LOG_LEVEL=INFO
+    depends_on:
+      - postgres
+      - minio
+    volumes:
+      - ./logs:/app/logs
+      - ./temp_videos:/app/temp_videos
+    networks:
+      - staging-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=tracking_staging
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=staging_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - staging-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=staging_minio
+      - MINIO_ROOT_PASSWORD=staging_secret_key
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - staging-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # Optional: Redis for distributed progress tracking
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - staging-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
+  minio_data:
+
+networks:
+  staging-network:
+    driver: bridge
