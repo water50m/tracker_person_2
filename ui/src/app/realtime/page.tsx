@@ -1,4 +1,4 @@
-import RealtimeTab from "@/components/input-manager/RealtimeTab";
+import RealtimeTab from "@/components/realtime/RealtimeTab";
 
 export const metadata = {
   title: "NEXUS-EYE // Realtime Analysis",

@@ -210,6 +210,9 @@ class VideoQueueService:
         
         # Setup database table
         self._setup_database()
+
+        # Load existing jobs from database
+        self._load_jobs_from_db()
     
     def _setup_database(self):
         """Setup video_queue table in database"""
@@ -314,7 +317,79 @@ class VideoQueueService:
         except Exception as e:
             print(f"[VideoQueueService] Error deleting job from DB: {e}")
             self._db.conn.rollback()
-    
+
+    def _load_jobs_from_db(self):
+        """Load existing pending and paused jobs from database on startup"""
+        try:
+            with self._db.conn.cursor() as cur:
+                cur.execute("""
+                    SELECT job_id, source, camera_id, display_mode, status, priority,
+                           created_at, started_at, completed_at, progress_pct,
+                           frames_processed, total_frames, detections_count,
+                           error_message, options, video_metadata
+                    FROM video_queue
+                    WHERE status IN ('pending', 'paused', 'processing', 'stopped')
+                """)
+                rows = cur.fetchall()
+
+                for row in rows:
+                    (job_id, source, camera_id, display_mode, status, priority,
+                     created_at, started_at, completed_at, progress_pct,
+                     frames_processed, total_frames, detections_count,
+                     error_message, options, metadata) = row
+
+                    job_data = {
+                        "id": job_id,
+                        "source": source,
+                        "camera_id": camera_id,
+                        "display_mode": display_mode,
+                        "status": status,
+                        "priority": priority,
+                        "created_at": created_at.timestamp() if created_at else time.time(),
+                        "started_at": started_at.timestamp() if started_at else None,
+                        "completed_at": completed_at.timestamp() if completed_at else None,
+                        "progress_pct": progress_pct,
+                        "frames_processed": frames_processed,
+                        "total_frames": total_frames,
+                        "detections_count": detections_count,
+                        "error_message": error_message,
+                    }
+
+                    # Merge options and metadata
+                    if options:
+                        job_data.update(options)
+                    if metadata:
+                        job_data.update(metadata)
+
+                    job = VideoJob.from_dict(job_data)
+
+                    # Handle processing jobs that were interrupted - convert to paused
+                    if job.status == JobStatus.PROCESSING:
+                        job.status = JobStatus.PAUSED
+                        print(f"[VideoQueueService] Converted interrupted job {job_id} from processing to paused")
+                        # Save the status change to database immediately
+                        self._save_job_to_db(job)
+
+                    self._jobs[job_id] = job
+
+                    # Only add pending, paused, and stopped jobs to queue order
+                    if job.status in [JobStatus.PENDING, JobStatus.PAUSED, JobStatus.STOPPED]:
+                        # Insert based on priority
+                        inserted = False
+                        for i, existing_id in enumerate(self._queue_order):
+                            existing_job = self._jobs[existing_id]
+                            if job.priority > existing_job.priority:
+                                self._queue_order.insert(i, job_id)
+                                inserted = True
+                                break
+                        if not inserted:
+                            self._queue_order.append(job_id)
+
+                print(f"[VideoQueueService] Loaded {len(rows)} jobs from database ({len(self._queue_order)} in queue)")
+
+        except Exception as e:
+            print(f"[VideoQueueService] Error loading jobs from DB: {e}")
+
     async def add_video(
         self,
         source: str,
@@ -484,7 +559,7 @@ class VideoQueueService:
             job_id: Job ID to pause
             
         Returns:
-            True if paused successfully
+            True if paused successfully (idempotent - returns True if already paused)
         """
         with self._lock:
             if job_id not in self._jobs:
@@ -492,8 +567,12 @@ class VideoQueueService:
             
             job = self._jobs[job_id]
             
+            # Idempotent: if already paused, consider it success
+            if job.status == JobStatus.PAUSED:
+                return True
+            
             if job.status != JobStatus.PROCESSING:
-                print(f"[VideoQueueService] Cannot pause job {job_id}: not currently processing")
+                print(f"[VideoQueueService] Cannot pause job {job_id}: not currently processing (status: {job.status.value})")
                 return False
             
             # Signal stop event to pause processing
@@ -518,7 +597,7 @@ class VideoQueueService:
             job_id: Job ID to resume
             
         Returns:
-            True if resumed successfully
+            True if resumed successfully (idempotent - returns True if already active/completed)
         """
         with self._lock:
             if job_id not in self._jobs:
@@ -526,8 +605,12 @@ class VideoQueueService:
             
             job = self._jobs[job_id]
             
-            if job.status != JobStatus.PAUSED:
-                print(f"[VideoQueueService] Cannot resume job {job_id}: not paused")
+            # Idempotent: if already pending, processing, or completed, consider it success
+            if job.status in [JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.COMPLETED]:
+                return True
+            
+            if job.status not in [JobStatus.PAUSED, JobStatus.STOPPED]:
+                print(f"[VideoQueueService] Cannot resume job {job_id}: not paused or stopped (status: {job.status.value})")
                 return False
             
             job.status = JobStatus.PENDING
@@ -562,6 +645,10 @@ class VideoQueueService:
             
             job = self._jobs[job_id]
             
+            # Idempotent: if already stopped, consider it success
+            if job.status == JobStatus.STOPPED:
+                return True
+            
             if job.status == JobStatus.PROCESSING:
                 # Signal stop event
                 if self._stop_event:
@@ -584,7 +671,256 @@ class VideoQueueService:
         
         self._notify_status_change(job_id)
         return True
-    
+
+    async def start_queue_job_immediately(self, job_id: str) -> bool:
+        """
+        Stop current processing job and start this queue job immediately.
+
+        Args:
+            job_id: Job ID from queue to start immediately
+
+        Returns:
+            True if successful (idempotent - returns True if already processing)
+        """
+        with self._lock:
+            if job_id not in self._jobs:
+                return False
+
+            target_job = self._jobs[job_id]
+
+            # Idempotent: if already processing, consider it success
+            if target_job.status == JobStatus.PROCESSING:
+                return True
+
+            # Can only start pending jobs immediately
+            if target_job.status != JobStatus.PENDING:
+                print(f"[VideoQueueService] Cannot start job {job_id}: not pending (status: {target_job.status.value})")
+                return False
+
+            # If there's a current processing job, pause it
+            if self._current_job_id and self._current_job_id in self._jobs:
+                current_job = self._jobs[self._current_job_id]
+                if current_job.status == JobStatus.PROCESSING:
+                    # Signal stop to pause current job
+                    if self._stop_event:
+                        self._stop_event.set()
+                    current_job.status = JobStatus.PAUSED
+                    print(f"[VideoQueueService] Paused current job {self._current_job_id} to start {job_id}")
+
+            # Move target job to front of queue
+            if job_id in self._queue_order:
+                self._queue_order.remove(job_id)
+            self._queue_order.insert(0, job_id)
+            target_job.priority = 9999  # Highest priority
+
+        # Save changes to database
+        if self._current_job_id:
+            self._save_job_to_db(self._jobs[self._current_job_id])
+        self._save_job_to_db(target_job)
+
+        print(f"[VideoQueueService] Job {job_id} moved to front, will start immediately")
+
+        self._notify_status_change(job_id)
+        if self._current_job_id:
+            self._notify_status_change(self._current_job_id)
+        return True
+
+    async def cancel_and_remove_job(self, job_id: str) -> bool:
+        """
+        Cancel current processing and remove from queue.
+
+        Args:
+            job_id: Job ID to cancel and remove
+
+        Returns:
+            True if successful (idempotent - returns True if already cancelled/completed/stopped)
+        """
+        with self._lock:
+            if job_id not in self._jobs:
+                return False
+
+            job = self._jobs[job_id]
+
+            # Idempotent: if already in terminal state, just remove it
+            if job.status in [JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.STOPPED]:
+                # Just remove from queue order if present
+                if job_id in self._queue_order:
+                    self._queue_order.remove(job_id)
+                
+                # Remove from jobs dict
+                del self._jobs[job_id]
+                
+                # Delete from database
+                self._delete_job_from_db(job_id)
+                return True
+
+            # Can only cancel processing or pending jobs
+            if job.status not in [JobStatus.PROCESSING, JobStatus.PENDING]:
+                print(f"[VideoQueueService] Cannot cancel job {job_id}: status is {job.status.value}")
+                return False
+
+            # Signal stop event to stop processing (for processing jobs)
+            if job.status == JobStatus.PROCESSING and self._stop_event:
+                self._stop_event.set()
+
+            job.status = JobStatus.CANCELLED
+            job.completed_at = time.time()
+
+            # Remove from queue order if present
+            if job_id in self._queue_order:
+                self._queue_order.remove(job_id)
+
+            # Remove from jobs dict
+            del self._jobs[job_id]
+
+        # Delete from database
+        self._delete_job_from_db(job_id)
+
+        print(f"[VideoQueueService] Cancelled and removed job {job_id}")
+        return True
+
+    async def reprocess_video(self, job_id: str, start_immediately: bool = False) -> Optional[str]:
+        """
+        Reprocess a completed video by creating a new job.
+
+        Args:
+            job_id: Completed job ID to reprocess
+            start_immediately: If True, stop current job and start this immediately
+
+        Returns:
+            New job ID if successful, None otherwise
+        """
+        with self._lock:
+            if job_id not in self._jobs:
+                # Try to load from database
+                return None
+
+            old_job = self._jobs[job_id]
+
+            # Can only reprocess completed, failed, stopped, or cancelled jobs
+            if old_job.status not in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.STOPPED, JobStatus.CANCELLED]:
+                print(f"[VideoQueueService] Cannot reprocess job {job_id}: status is {old_job.status.value}")
+                return None
+
+            # Create new job with same parameters
+            new_job_id = str(uuid.uuid4())
+            new_job = VideoJob(
+                id=new_job_id,
+                source=old_job.source,
+                camera_id=old_job.camera_id,
+                display_mode=old_job.display_mode,
+                status=JobStatus.PENDING,
+                priority=9999 if start_immediately else old_job.priority,
+                original_filename=f"[RE] {old_job.original_filename}" if old_job.original_filename else f"[RE] {old_job.source}",
+                width=old_job.width,
+                height=old_job.height,
+                fps=old_job.fps,
+                duration_sec=old_job.duration_sec,
+                save_to_db=old_job.save_to_db,
+                save_images=old_job.save_images,
+                save_bbox_images=old_job.save_bbox_images,
+                frame_skip=old_job.frame_skip,
+                show_detector_bbox=old_job.show_detector_bbox,
+                show_detector_track_id=old_job.show_detector_track_id,
+                show_classifier_class_name=old_job.show_classifier_class_name,
+                classifier_top_n=old_job.classifier_top_n,
+            )
+
+            self._jobs[new_job_id] = new_job
+
+            # If start immediately, pause current job and insert at front
+            if start_immediately:
+                if self._current_job_id and self._current_job_id in self._jobs:
+                    current_job = self._jobs[self._current_job_id]
+                    if current_job.status == JobStatus.PROCESSING:
+                        if self._stop_event:
+                            self._stop_event.set()
+                        current_job.status = JobStatus.PAUSED
+                        # Add paused job back to queue
+                        if self._current_job_id not in self._queue_order:
+                            self._queue_order.insert(0, self._current_job_id)
+                        self._save_job_to_db(current_job)
+
+                self._queue_order.insert(0, new_job_id)
+            else:
+                # Insert based on priority
+                inserted = False
+                for i, existing_id in enumerate(self._queue_order):
+                    existing_job = self._jobs[existing_id]
+                    if new_job.priority > existing_job.priority:
+                        self._queue_order.insert(i, new_job_id)
+                        inserted = True
+                        break
+                if not inserted:
+                    self._queue_order.append(new_job_id)
+
+        # Save to database
+        self._save_job_to_db(new_job)
+
+        print(f"[VideoQueueService] Created reprocess job {new_job_id} from {job_id}")
+
+        self._notify_status_change(new_job_id)
+        return new_job_id
+
+    async def resume_and_replace(self, job_id: str) -> bool:
+        """
+        Resume a paused job and replace the current queue with it.
+        The current queue job (if any) will become paused.
+
+        Args:
+            job_id: Paused job ID to resume
+
+        Returns:
+            True if successful (idempotent - returns True if already processing)
+        """
+        with self._lock:
+            if job_id not in self._jobs:
+                return False
+
+            paused_job = self._jobs[job_id]
+
+            # Idempotent: if already processing, consider it success
+            if paused_job.status == JobStatus.PROCESSING:
+                return True
+
+            # Can only resume paused jobs
+            if paused_job.status != JobStatus.PAUSED:
+                print(f"[VideoQueueService] Cannot resume job {job_id}: not paused")
+                return False
+
+            # If there's a current processing job, pause it
+            if self._current_job_id and self._current_job_id in self._jobs:
+                current_job = self._jobs[self._current_job_id]
+                if current_job.status == JobStatus.PROCESSING:
+                    if self._stop_event:
+                        self._stop_event.set()
+                    current_job.status = JobStatus.PAUSED
+                    # Add to queue if not present
+                    if self._current_job_id not in self._queue_order:
+                        self._queue_order.insert(0, self._current_job_id)
+                    print(f"[VideoQueueService] Paused current job {self._current_job_id}")
+
+            # Resume the target job and put at front
+            paused_job.status = JobStatus.PENDING
+            paused_job.started_at = None
+
+            if job_id in self._queue_order:
+                self._queue_order.remove(job_id)
+            self._queue_order.insert(0, job_id)
+            paused_job.priority = 9999
+
+        # Save to database
+        if self._current_job_id and self._current_job_id in self._jobs:
+            self._save_job_to_db(self._jobs[self._current_job_id])
+        self._save_job_to_db(paused_job)
+
+        print(f"[VideoQueueService] Resumed job {job_id} and moved to front")
+
+        self._notify_status_change(job_id)
+        if self._current_job_id:
+            self._notify_status_change(self._current_job_id)
+        return True
+
     def get_job(self, job_id: str) -> Optional[VideoJob]:
         """Get a job by ID"""
         return self._jobs.get(job_id)

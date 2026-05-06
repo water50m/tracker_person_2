@@ -195,9 +195,12 @@ class StreamProcessor:
         self.camera_id = stream_camera_id
         
         try:
-            # Open video capture
-            cap = cv2.VideoCapture(resolved_source)
-            if not cap.isOpened():
+            loop = asyncio.get_running_loop()
+
+            # Open video capture. OpenCV calls can block for network streams, so
+            # keep them off the FastAPI event loop.
+            cap = await loop.run_in_executor(None, cv2.VideoCapture, resolved_source)
+            if not await loop.run_in_executor(None, cap.isOpened):
                 raise ValueError(f"Cannot open stream source: {source}")
             
             # Get stream info (may be 0 for live streams)
@@ -228,7 +231,7 @@ class StreamProcessor:
             while not self._stop_event.is_set():
                 try:
                     # Read frame
-                    ret, frame = cap.read()
+                    ret, frame = await loop.run_in_executor(None, cap.read)
                     
                     if not ret:
                         # Failed to read frame
@@ -330,7 +333,7 @@ class StreamProcessor:
                     await asyncio.sleep(0.1)  # Brief pause on error
             
             # Cleanup
-            cap.release()
+            await loop.run_in_executor(None, cap.release)
             
             # Flush remaining batch
             if self._detection_batch:

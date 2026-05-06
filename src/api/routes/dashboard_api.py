@@ -260,7 +260,7 @@ async def start_prediction(camera_id: str, background_tasks: BackgroundTasks, re
     # If it's a YouTube link, we extract the stream URL
     if YOUTUBE_PATTERN.search(source):
         try:
-            info = _extract_youtube_stream(source)
+            info = await asyncio.to_thread(_extract_youtube_stream, source)
             stream_url = info["stream_url"]
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"yt-dlp error: {e}")

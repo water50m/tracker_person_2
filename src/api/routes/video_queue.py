@@ -218,8 +218,8 @@ async def upload_and_add_to_queue(
 @router.get("/status", response_model=GlobalStatusResponse)
 async def get_global_status():
     """
-    Get global status of all video processing jobs.
-    
+    Get global status of all video processing jobs (from memory).
+
     Returns:
     - current_job: The job currently being processed
     - queue: List of pending jobs in processing order
@@ -232,6 +232,130 @@ async def get_global_status():
         service = await _get_service()
         status = service.get_global_status()
         return GlobalStatusResponse(**status)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+import json
+from datetime import datetime
+
+# อย่าลืม import GlobalStatusResponse, DatabaseService ที่คุณใช้อยู่
+
+def parse_dt_to_timestamp(dt_val):
+    """Helper สำหรับแปลง Datetime หรือ String จาก DB ให้เป็น Timestamp อย่างปลอดภัย"""
+    if not dt_val:
+        return None
+    if hasattr(dt_val, "timestamp"):  # กรณี DB คืนค่าเป็น datetime object
+        return dt_val.timestamp()
+    if isinstance(dt_val, str):       # กรณี DB คืนค่าเป็น string
+        try:
+            # แทนที่เว้นวรรคด้วย T เพื่อรองรับ isoformat
+            return datetime.fromisoformat(dt_val.replace(" ", "T")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+@router.get("/db-status", response_model=GlobalStatusResponse)
+async def get_db_status():
+    """
+    Get global status of all video processing jobs from database.
+    This includes all persisted jobs, not just current in-memory state.
+    """
+    try:
+        db = DatabaseService()
+
+        with db.conn.cursor() as cur:
+            # Fetch all jobs from database
+            cur.execute("""
+                SELECT
+                    job_id, source, camera_id, display_mode, status,
+                    priority, created_at, started_at, completed_at,
+                    progress_pct, frames_processed, total_frames, detections_count,
+                    error_message, video_metadata
+                FROM video_queue
+                ORDER BY priority DESC, created_at ASC
+            """)
+            
+            rows = cur.fetchall()
+
+        # สร้าง Group รอไว้สำหรับการจัดหมวดหมู่ (ใช้ Dictionary lookup ทำงานเร็วกว่า if/elif)
+        current_job = None
+        categorized = {
+            "pending": [],
+            "paused": [],
+            "completed": [],
+            "failed": [],
+            "stopped": []
+        }
+
+        for row in rows:
+            # ใช้ Index ในการอ้างอิงข้อมูล เร็วกว่า dict(zip(columns, row)) ในลูป
+            # 0:job_id, 1:source, 2:camera_id, 3:display_mode, 4:status,
+            # 5:priority, 6:created_at, 7:started_at, 8:completed_at,
+            # 9:progress_pct, 10:frames_processed, 11:total_frames, 12:detections_count,
+            # 13:error_message, 14:video_metadata
+
+            # จัดการ metadata แบบป้องกัน error
+            raw_meta = row[14]
+            if raw_meta and isinstance(raw_meta, str):
+                try:
+                    metadata = json.loads(raw_meta)
+                except json.JSONDecodeError:
+                    metadata = {}
+            else:
+                metadata = raw_meta or {}
+
+            status = row[4]
+
+            # สร้าง Job Dictionary โดยเรียกใช้ Helper function สำหรับเวลา
+            job = {
+                "id": row[0],
+                "source": row[1],
+                "camera_id": row[2],
+                "display_mode": row[3],
+                "status": status,
+                "priority": row[5],
+                "created_at": parse_dt_to_timestamp(row[6]),
+                "started_at": parse_dt_to_timestamp(row[7]),
+                "completed_at": parse_dt_to_timestamp(row[8]),
+                "progress_pct": row[9] or 0,
+                "frames_processed": row[10] or 0,
+                "total_frames": row[11] or 0,
+                "detections_count": row[12] or 0,
+                "error_message": row[13] or "",
+                "original_filename": metadata.get("original_filename", ""),
+                "width": metadata.get("width"),
+                "height": metadata.get("height"),
+                "fps": metadata.get("fps"),
+                "duration_sec": metadata.get("duration_sec"),
+            }
+
+            # จัดกลุ่มตาม Status O(1)
+            if status == "processing":
+                current_job = job
+            elif status in categorized:
+                categorized[status].append(job)
+        response_data = {
+            "current_job": current_job,
+            "queue": categorized["pending"],
+            "paused": categorized["paused"],
+            "completed": categorized["completed"],
+            "failed": categorized["failed"],
+            "stopped": categorized["stopped"],
+            "stats": {
+                "total_jobs": len(rows),
+                "pending_count": len(categorized["pending"]),
+                "processing_count": 1 if current_job else 0,
+                "paused_count": len(categorized["paused"]),
+                "completed_count": len(categorized["completed"]),
+                "failed_count": len(categorized["failed"]),
+                "stopped_count": len(categorized["stopped"]),
+            }
+        }
+
+        # สรุปผลเตรียม Return
+        return GlobalStatusResponse(**response_data)
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -411,6 +535,75 @@ async def clear_completed_jobs():
             "status": "cleared",
             "removed_count": removed_count
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class StartImmediatelyRequest(BaseModel):
+    job_id: str
+
+
+class ReprocessRequest(BaseModel):
+    job_id: str
+    start_immediately: bool = False
+
+
+@router.post("/start-immediately")
+async def start_queue_job_immediately(request: StartImmediatelyRequest):
+    """Stop current job and start this queue job immediately."""
+    try:
+        service = await _get_service()
+        success = await service.start_queue_job_immediately(request.job_id)
+        if not success:
+            raise HTTPException(status_code=400, detail=f"Failed to start job {request.job_id}")
+        return {"status": "started_immediately", "job_id": request.job_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/cancel-and-remove")
+async def cancel_and_remove_job(request: JobIdRequest):
+    """Cancel current processing and remove from queue."""
+    try:
+        service = await _get_service()
+        success = await service.cancel_and_remove_job(request.job_id)
+        if not success:
+            raise HTTPException(status_code=400, detail=f"Failed to cancel job {request.job_id}")
+        return {"status": "cancelled_and_removed", "job_id": request.job_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/reprocess")
+async def reprocess_video(request: ReprocessRequest):
+    """Reprocess a completed video by creating a new job."""
+    try:
+        service = await _get_service()
+        new_job_id = await service.reprocess_video(request.job_id, request.start_immediately)
+        if not new_job_id:
+            raise HTTPException(status_code=400, detail=f"Failed to reprocess job {request.job_id}")
+        return {"status": "reprocess_created", "original_job_id": request.job_id, "new_job_id": new_job_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/resume-and-replace")
+async def resume_and_replace(request: JobIdRequest):
+    """Resume a paused job and replace the current queue with it."""
+    try:
+        service = await _get_service()
+        success = await service.resume_and_replace(request.job_id)
+        if not success:
+            raise HTTPException(status_code=400, detail=f"Failed to resume job {request.job_id}")
+        return {"status": "resumed_and_replaced", "job_id": request.job_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

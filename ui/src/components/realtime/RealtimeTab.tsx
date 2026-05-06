@@ -66,6 +66,7 @@ export default function RealtimeTab() {
   const [isQueueLoading, setIsQueueLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"input" | "queue">("input");
   const [showAddToQueue, setShowAddToQueue] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<"all" | "processing" | "pending" | "paused" | "completed" | "stopped">("all");
 
   // Display options
   const [showDetectorBbox, setShowDetectorBbox] = useState(true);
@@ -90,6 +91,11 @@ export default function RealtimeTab() {
   const [showLogs, setShowLogs] = useState(false);
   const [cameraId, setCameraId] = useState("");
   const [queuePriority, setQueuePriority] = useState(0);
+
+  // Loading state for queue actions
+  const [pendingActions, setPendingActions] = useState<{
+    [jobId: string]: 'pause' | 'resume' | 'stop' | 'remove' | 'start_now' | 'cancel' | 'reprocess' | 'resume_replace'
+  }>({});
 
   // Camera dropdown state
   const [cameraList, setCameraList] = useState<Array<{ id: string; name: string; is_active: boolean }>>([]);
@@ -197,7 +203,7 @@ export default function RealtimeTab() {
       } catch (err) {
         console.error("[Realtime] Failed to fetch background status:", err);
       }
-    }, 2000);
+    }, 600000); // 10 minutes
 
     return () => clearInterval(pollInterval);
   }, [backgroundTaskId, isStreaming, displayMode, backendUrl]);
@@ -205,9 +211,11 @@ export default function RealtimeTab() {
   // Queue Management Functions
   const fetchQueueStatus = async () => {
     try {
-      const response = await fetch(`${backendUrl}/api/video-queue/status`);
+      // Use /db-status to get data from database (includes all persisted jobs)
+      const response = await fetch(`${backendUrl}/api/video-queue/db-status`);
       if (response.ok) {
         const status = await response.json();
+        console.log('[Queue] API response:', status);
         setQueueStatus(status);
       }
     } catch (err) {
@@ -215,16 +223,20 @@ export default function RealtimeTab() {
     }
   };
 
-  // Poll queue status
+  // Conditional polling: 3s when processing, 10min when idle
   useEffect(() => {
     fetchQueueStatus();
 
+    // Determine poll interval based on whether there's a processing job
+    const hasProcessingJob = queueStatus?.current_job != null;
+    const intervalMs = hasProcessingJob ? 3000 : 600000; // 3s vs 10min
+
     const pollInterval = setInterval(async () => {
       await fetchQueueStatus();
-    }, 3000);
+    }, intervalMs);
 
     return () => clearInterval(pollInterval);
-  }, [backendUrl]);
+  }, [backendUrl, queueStatus?.current_job?.id]);
 
   const addToQueue = async () => {
     if (selectedFiles.length === 0 && !videoPath.trim()) {
@@ -296,20 +308,32 @@ export default function RealtimeTab() {
   };
 
   const removeFromQueue = async (jobId: string) => {
+    setPendingActions(prev => ({ ...prev, [jobId]: 'remove' }));
+
     try {
       const response = await fetch(`${backendUrl}/api/video-queue/remove/${jobId}`, {
         method: "DELETE",
       });
 
-      if (response.ok) {
-        await fetchQueueStatus();
+      if (!response.ok) {
+        setError("Failed to remove job");
       }
     } catch (err) {
       console.error("[Realtime] Failed to remove job:", err);
+      setError("Failed to remove job");
+    } finally {
+      setPendingActions(prev => {
+        const updated = { ...prev };
+        delete updated[jobId];
+        return updated;
+      });
+      await fetchQueueStatus();
     }
   };
 
   const pauseJob = async (jobId: string) => {
+    setPendingActions(prev => ({ ...prev, [jobId]: 'pause' }));
+
     try {
       const response = await fetch(`${backendUrl}/api/video-queue/pause`, {
         method: "POST",
@@ -317,15 +341,26 @@ export default function RealtimeTab() {
         body: JSON.stringify({ job_id: jobId }),
       });
 
-      if (response.ok) {
-        await fetchQueueStatus();
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Failed to pause job' }));
+        setError(errorData.detail || 'Failed to pause job');
       }
     } catch (err) {
       console.error("[Realtime] Failed to pause job:", err);
+      setError("Failed to pause job");
+    } finally {
+      setPendingActions(prev => {
+        const updated = { ...prev };
+        delete updated[jobId];
+        return updated;
+      });
+      await fetchQueueStatus();
     }
   };
 
   const resumeJob = async (jobId: string) => {
+    setPendingActions(prev => ({ ...prev, [jobId]: 'resume' }));
+
     try {
       const response = await fetch(`${backendUrl}/api/video-queue/resume`, {
         method: "POST",
@@ -333,15 +368,25 @@ export default function RealtimeTab() {
         body: JSON.stringify({ job_id: jobId }),
       });
 
-      if (response.ok) {
-        await fetchQueueStatus();
+      if (!response.ok) {
+        setError("Failed to resume job");
       }
     } catch (err) {
       console.error("[Realtime] Failed to resume job:", err);
+      setError("Failed to resume job");
+    } finally {
+      setPendingActions(prev => {
+        const updated = { ...prev };
+        delete updated[jobId];
+        return updated;
+      });
+      await fetchQueueStatus();
     }
   };
 
   const stopJob = async (jobId: string) => {
+    setPendingActions(prev => ({ ...prev, [jobId]: 'stop' }));
+
     try {
       const response = await fetch(`${backendUrl}/api/video-queue/stop`, {
         method: "POST",
@@ -349,11 +394,19 @@ export default function RealtimeTab() {
         body: JSON.stringify({ job_id: jobId }),
       });
 
-      if (response.ok) {
-        await fetchQueueStatus();
+      if (!response.ok) {
+        setError("Failed to stop job");
       }
     } catch (err) {
       console.error("[Realtime] Failed to stop job:", err);
+      setError("Failed to stop job");
+    } finally {
+      setPendingActions(prev => {
+        const updated = { ...prev };
+        delete updated[jobId];
+        return updated;
+      });
+      await fetchQueueStatus();
     }
   };
 
@@ -384,6 +437,111 @@ export default function RealtimeTab() {
       }
     } catch (err) {
       console.error("[Realtime] Failed to clear completed:", err);
+    }
+  };
+
+  const startQueueJobImmediately = async (jobId: string) => {
+    setPendingActions(prev => ({ ...prev, [jobId]: 'start_now' }));
+
+    try {
+      const response = await fetch(`${backendUrl}/api/video-queue/start-immediately`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: jobId }),
+      });
+
+      if (!response.ok) {
+        setError("Failed to start job immediately");
+      }
+    } catch (err) {
+      console.error("[Realtime] Failed to start job immediately:", err);
+      setError("Failed to start job immediately");
+    } finally {
+      setPendingActions(prev => {
+        const updated = { ...prev };
+        delete updated[jobId];
+        return updated;
+      });
+      await fetchQueueStatus();
+    }
+  };
+
+  const cancelAndRemoveJob = async (jobId: string) => {
+    setPendingActions(prev => ({ ...prev, [jobId]: 'cancel' }));
+
+    try {
+      const response = await fetch(`${backendUrl}/api/video-queue/cancel-and-remove`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: jobId }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Failed to cancel job' }));
+        setError(errorData.detail || 'Failed to cancel job');
+      }
+    } catch (err) {
+      console.error("[Realtime] Failed to cancel and remove job:", err);
+      setError("Failed to cancel job");
+    } finally {
+      setPendingActions(prev => {
+        const updated = { ...prev };
+        delete updated[jobId];
+        return updated;
+      });
+      await fetchQueueStatus();
+    }
+  };
+
+  const reprocessVideo = async (jobId: string, startImmediately: boolean = false) => {
+    setPendingActions(prev => ({ ...prev, [jobId]: 'reprocess' }));
+
+    try {
+      const response = await fetch(`${backendUrl}/api/video-queue/reprocess`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: jobId, start_immediately: startImmediately }),
+      });
+
+      if (!response.ok) {
+        setError("Failed to reprocess video");
+      }
+    } catch (err) {
+      console.error("[Realtime] Failed to reprocess video:", err);
+      setError("Failed to reprocess video");
+    } finally {
+      setPendingActions(prev => {
+        const updated = { ...prev };
+        delete updated[jobId];
+        return updated;
+      });
+      await fetchQueueStatus();
+    }
+  };
+
+  const resumeAndReplace = async (jobId: string) => {
+    setPendingActions(prev => ({ ...prev, [jobId]: 'resume_replace' }));
+
+    try {
+      const response = await fetch(`${backendUrl}/api/video-queue/resume-and-replace`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: jobId }),
+      });
+
+      if (!response.ok) {
+        setError("Failed to resume and replace");
+      }
+    } catch (err) {
+      console.error("[Realtime] Failed to resume and replace:", err);
+      setError("Failed to resume and replace");
+    } finally {
+      setPendingActions(prev => {
+        const updated = { ...prev };
+        delete updated[jobId];
+        return updated;
+      });
+      await fetchQueueStatus();
     }
   };
 
@@ -703,6 +861,8 @@ export default function RealtimeTab() {
     }
   };
 
+
+  
   return (
     <div className="grid grid-cols-3 gap-6 w-full h-full">
       {/* Left: Video Source & Basic Controls / Queue Management */}
@@ -1269,151 +1429,286 @@ export default function RealtimeTab() {
           </SettingsCard>
         ) : (
           <SettingsCard title={activeTab === "queue" ? "QUEUE STATUS" : "BACKGROUND PROCESSING"}>
-            <div className="bg-slate-900/60 border border-slate-800 rounded-sm p-6 max-h-[400px] overflow-y-auto">
+            <div className="bg-slate-900/60 border border-slate-800 rounded-sm max-h-[400px]">
               {activeTab === "queue" ? (
-                /* Queue Status Display */
+                /* Queue Status Display - Continuous List */
                 <>
-                  {/* Current Job */}
-                  {queueStatus?.current_job && (
-                    <div className="mb-4">
-                      <div className="text-xs font-mono text-slate-400 mb-2">Currently Processing</div>
-                      <div className="bg-yellow-950/30 border border-yellow-500/40 rounded-sm p-3">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="font-mono text-sm text-yellow-400 truncate max-w-[180px]">
-                            {queueStatus.current_job.original_filename || queueStatus.current_job.camera_id}
-                          </span>
-                          <span className="font-mono text-xs text-yellow-500">● {queueStatus.current_job.progress_pct}%</span>
-                        </div>
-                        <div className="w-full bg-slate-800 rounded-full h-1.5 mb-2">
-                          <div
-                            className="bg-yellow-500 h-1.5 rounded-full transition-all"
-                            style={{ width: `${queueStatus.current_job.progress_pct}%` }}
-                          />
-                        </div>
-                        <div className="flex gap-1">
-                          <button
-                            onClick={() => pauseJob(queueStatus.current_job!.id)}
-                            className="flex-1 px-2 py-1 font-mono text-[10px] rounded-sm border border-amber-500/60 text-amber-400 hover:bg-amber-950/30"
-                          >
-                            ⏸ PAUSE
-                          </button>
-                          <button
-                            onClick={() => stopJob(queueStatus.current_job!.id)}
-                            className="flex-1 px-2 py-1 font-mono text-[10px] rounded-sm border border-red-500/60 text-red-400 hover:bg-red-950/30"
-                          >
-                            ⏹ STOP
-                          </button>
-                        </div>
-                      </div>
+                  {/* Status Filter */}
+                  {queueStatus && (
+                    <div className="mb-3 flex flex-wrap gap-1">
+                      {[
+                        { key: 'all', label: 'ALL', count: (queueStatus.current_job ? 1 : 0) + queueStatus.queue.length + queueStatus.paused.length + queueStatus.completed.length + queueStatus.stopped.length, color: 'text-slate-400 border-slate-600' },
+                        { key: 'processing', label: 'PROC', count: queueStatus.current_job ? 1 : 0, color: 'text-yellow-400 border-yellow-500/60' },
+                        { key: 'pending', label: 'PEND', count: queueStatus.queue.length, color: 'text-slate-300 border-slate-600' },
+                        { key: 'paused', label: 'PAUSE', count: queueStatus.paused.length, color: 'text-amber-400 border-amber-500/60' },
+                        { key: 'completed', label: 'DONE', count: queueStatus.completed.length, color: 'text-green-400 border-green-500/60' },
+                        { key: 'stopped', label: 'STOP', count: queueStatus.stopped.length, color: 'text-red-400 border-red-500/60' },
+                      ].map((filter) => (
+                        <button
+                          key={filter.key}
+                          onClick={() => setStatusFilter(filter.key as typeof statusFilter)}
+                          className={`px-2 py-1 font-mono text-[10px] rounded-sm border ${filter.color} ${
+                            statusFilter === filter.key ? 'bg-slate-700/50' : 'hover:bg-slate-800/50'
+                          }`}
+                        >
+                          {filter.label} ({filter.count})
+                        </button>
+                      ))}
                     </div>
                   )}
 
-                  {/* Queue List */}
-                  {queueStatus && queueStatus.queue.length > 0 && (
-                    <div className="mb-4">
-                      <div className="text-xs font-mono text-slate-400 mb-2">Pending Queue ({queueStatus.queue.length})</div>
-                      <div className="space-y-2 max-h-32 overflow-y-auto">
-                        {queueStatus.queue.map((job, index) => (
-                          <div key={job.id} className="bg-slate-800/50 border border-slate-700 rounded-sm p-2">
-                            <div className="flex items-center justify-between">
-                              <span className="font-mono text-xs text-slate-300 truncate max-w-[150px]">
-                                {index + 1}. {job.original_filename || job.camera_id}
-                              </span>
-                              <div className="flex gap-1">
-                                {index > 0 && (
+                  {/* All Jobs in Continuous List */}
+                  {(() => {
+                    // Combine all jobs into a single list with their status
+                    const allJobs: Array<{job: VideoJob, type: 'processing' | 'pending' | 'paused' | 'completed' | 'stopped', index?: number}> = [];
+
+                    // Current job (processing) - always first
+                    if (queueStatus?.current_job && statusFilter !== 'pending' && statusFilter !== 'paused' && statusFilter !== 'completed' && statusFilter !== 'stopped') {
+                      allJobs.push({ job: queueStatus.current_job, type: 'processing' });
+                    }
+
+                    // Queue (pending) jobs
+                    if (statusFilter !== 'processing' && statusFilter !== 'paused' && statusFilter !== 'completed' && statusFilter !== 'stopped') {
+                      queueStatus?.queue.forEach((job, idx) => {
+                        allJobs.push({ job, type: 'pending', index: idx });
+                      });
+                    }
+
+                    // Paused jobs
+                    if (statusFilter !== 'processing' && statusFilter !== 'pending' && statusFilter !== 'completed' && statusFilter !== 'stopped') {
+                      queueStatus?.paused.forEach((job) => {
+                        allJobs.push({ job, type: 'paused' });
+                      });
+                    }
+
+                    // Completed jobs (limited to last 10)
+                    if (statusFilter !== 'processing' && statusFilter !== 'pending' && statusFilter !== 'paused' && statusFilter !== 'stopped') {
+                      queueStatus?.completed.slice(0, 10).forEach((job) => {
+                        allJobs.push({ job, type: 'completed' });
+                      });
+                    }
+
+                    // Stopped jobs
+                    if (statusFilter !== 'processing' && statusFilter !== 'pending' && statusFilter !== 'paused' && statusFilter !== 'completed') {
+                      queueStatus?.stopped.forEach((job) => {
+                        allJobs.push({ job, type: 'stopped' });
+                      });
+                    }
+
+                    // Filter by specific status
+                    const filteredJobs = statusFilter === 'all'
+                      ? allJobs
+                      : allJobs.filter(item => item.type === statusFilter);
+
+                    return filteredJobs.length > 0 ? (
+                      <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                        {filteredJobs.map((item, listIndex) => {
+                          const { job, type, index } = item;
+                          const isProcessing = type === 'processing';
+                          const isPending = type === 'pending';
+                          const isPaused = type === 'paused';
+                          const isCompleted = type === 'completed';
+                          const isStopped = type === 'stopped';
+
+                          // Determine styling based on status
+                          const borderColor = isProcessing ? 'border-yellow-500/40' :
+                                            isPending ? 'border-slate-600' :
+                                            isPaused ? 'border-amber-500/40' :
+                                            isStopped ? 'border-red-500/40' :
+                                            'border-green-500/30';
+
+                          const bgColor = isProcessing ? 'bg-yellow-950/30' :
+                                         isPending ? 'bg-slate-800/40' :
+                                         isPaused ? 'bg-amber-950/20' :
+                                         isStopped ? 'bg-red-950/20' :
+                                         'bg-green-950/10';
+
+                          const textColor = isProcessing ? 'text-yellow-400' :
+                                           isPending ? 'text-slate-300' :
+                                           isPaused ? 'text-amber-400' :
+                                           isStopped ? 'text-red-400' :
+                                           'text-green-400';
+
+                          const statusIcon = isProcessing ? '●' :
+                                            isPending ? '○' :
+                                            isPaused ? '⏸' :
+                                            isStopped ? '■' :
+                                            '✓';
+
+                          const pendingAction = pendingActions[job.id];
+                          const isPendingAction = !!pendingAction;
+
+                          return (
+                            <div key={`${type}-${job.id}`} className={`${bgColor} border ${borderColor} rounded-sm p-3 relative`}>
+                              {/* Loading Overlay */}
+                              {isPendingAction && (
+                                <div className="absolute inset-0 bg-slate-900/70 rounded-sm flex items-center justify-center z-10">
+                                  <div className="flex items-center gap-2">
+                                    <svg className="animate-spin h-4 w-4 text-yellow-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    <span className="font-mono text-xs text-yellow-400 uppercase">
+                                      {pendingAction === 'pause' && 'Pausing...'}
+                                      {pendingAction === 'resume' && 'Resuming...'}
+                                      {pendingAction === 'resume_replace' && 'Resuming...'}
+                                      {pendingAction === 'stop' && 'Stopping...'}
+                                      {pendingAction === 'remove' && 'Removing...'}
+                                      {pendingAction === 'cancel' && 'Cancelling...'}
+                                      {pendingAction === 'start_now' && 'Starting...'}
+                                      {pendingAction === 'reprocess' && 'Reprocessing...'}
+                                    </span>
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Header: Status icon + Filename + Progress */}
+                              <div className="flex items-center justify-between mb-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className={`font-mono text-xs ${textColor} flex-shrink-0`}>{statusIcon}</span>
+                                  <span className={`font-mono text-xs ${textColor} truncate max-w-[160px]`}>
+                                    {job.original_filename || job.camera_id}
+                                  </span>
+                                </div>
+                                <span className={`font-mono text-[10px] ${isProcessing ? 'text-yellow-500' : 'text-slate-500'} flex-shrink-0 ml-2`}>
+                                  {isProcessing && `${job.progress_pct}%`}
+                                  {isPaused && `${job.progress_pct}%`}
+                                  {isCompleted && `${job.detections_count} detections`}
+                                  {isPending && index !== undefined && `P:${job.priority}`}
+                                  {isStopped && `${job.progress_pct}%`}
+                                </span>
+                              </div>
+
+                              {/* Progress bar for processing/paused/stopped */}
+                              {(isProcessing || isPaused || isStopped) && (
+                                <div className="w-full bg-slate-800 rounded-full h-1.5 mb-3">
+                                  <div
+                                    className={`h-1.5 rounded-full transition-all ${isProcessing ? 'bg-yellow-500' : isPaused ? 'bg-amber-500/60' : 'bg-red-500/60'}`}
+                                    style={{ width: `${job.progress_pct}%` }}
+                                  />
+                                </div>
+                              )}
+
+                              {/* Status-specific buttons */}
+                              <div className="flex gap-2">
+                                {isProcessing && (
+                                  <>
+                                    <button
+                                      onClick={() => pauseJob(job.id)}
+                                      disabled={isPendingAction}
+                                      className="flex-1 px-2 py-1 font-mono text-[10px] rounded-sm border border-amber-500/60 text-amber-400 hover:bg-amber-950/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                      {pendingAction === 'pause' ? '⏳ PAUSING...' : '⏸ PAUSE'}
+                                    </button>
+                                    <button
+                                      onClick={() => cancelAndRemoveJob(job.id)}
+                                      disabled={isPendingAction}
+                                      className="flex-1 px-2 py-1 font-mono text-[10px] rounded-sm border border-red-500/60 text-red-400 hover:bg-red-950/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                      {pendingAction === 'cancel' ? '⏳ CANCELLING...' : '⏹ CANCEL'}
+                                    </button>
+                                  </>
+                                )}
+
+                                {isPending && (
                                   <button
-                                    onClick={() => reorderQueue(job.id, 0)}
-                                    className="p-1 text-slate-500 hover:text-yellow-400"
-                                    title="Move to top"
+                                    onClick={() => startQueueJobImmediately(job.id)}
+                                    disabled={isPendingAction}
+                                    className="flex-1 px-2 py-1 font-mono text-[10px] rounded-sm border border-yellow-500/60 text-yellow-400 hover:bg-yellow-950/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title="Stop current and start this immediately"
                                   >
-                                    ↑
+                                    {pendingAction === 'start_now' ? '⏳ STARTING...' : '⚡ START NOW'}
                                   </button>
                                 )}
-                                <button
-                                  onClick={() => removeFromQueue(job.id)}
-                                  className="p-1 text-slate-500 hover:text-red-400"
-                                  title="Remove from queue"
-                                >
-                                  ×
-                                </button>
+
+                                {isPaused && (
+                                  <button
+                                    onClick={() => resumeAndReplace(job.id)}
+                                    disabled={isPendingAction}
+                                    className="flex-1 px-2 py-1 font-mono text-[10px] rounded-sm border border-green-500/60 text-green-400 hover:bg-green-950/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title="Resume and replace current queue"
+                                  >
+                                    {pendingAction === 'resume_replace' ? '⏳ RESUMING...' : '▶ RESUME & REPLACE'}
+                                  </button>
+                                )}
+
+                                {isCompleted && (
+                                  <button
+                                    onClick={() => reprocessVideo(job.id, true)}
+                                    disabled={isPendingAction}
+                                    className="flex-1 px-2 py-1 font-mono text-[10px] rounded-sm border border-blue-500/60 text-blue-400 hover:bg-blue-950/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title="Re-process this video (replaces current queue)"
+                                  >
+                                    {pendingAction === 'reprocess' ? '⏳ REPROCESSING...' : '↻ RE-PROCESS'}
+                                  </button>
+                                )}
+
+                                {isStopped && (
+                                  <>
+                                    <button
+                                      onClick={() => resumeJob(job.id)}
+                                      disabled={isPendingAction}
+                                      className="flex-1 px-2 py-1 font-mono text-[10px] rounded-sm border border-green-500/60 text-green-400 hover:bg-green-950/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                                      title="Resume this stopped job"
+                                    >
+                                      {pendingAction === 'resume' ? '⏳ RESUMING...' : '▶ RESUME'}
+                                    </button>
+                                    <button
+                                      onClick={() => removeFromQueue(job.id)}
+                                      disabled={isPendingAction}
+                                      className="flex-1 px-2 py-1 font-mono text-[10px] rounded-sm border border-red-500/60 text-red-400 hover:bg-red-950/30 disabled:opacity-50 disabled:cursor-not-allowed"
+                                      title="Remove from queue"
+                                    >
+                                      {pendingAction === 'remove' ? '⏳ REMOVING...' : '🗑 REMOVE'}
+                                    </button>
+                                  </>
+                                )}
                               </div>
-                            </div>
-                            <div className="flex items-center gap-2 mt-1">
-                              <span className="font-mono text-[10px] text-slate-500">P:{job.priority}</span>
-                              <span className="font-mono text-[10px] text-slate-500">{job.width}×{job.height}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
 
-                  {/* Paused Jobs */}
-                  {queueStatus && queueStatus.paused.length > 0 && (
-                    <div className="mb-4">
-                      <div className="text-xs font-mono text-slate-400 mb-2">Paused ({queueStatus.paused.length})</div>
-                      <div className="space-y-2 max-h-24 overflow-y-auto">
-                        {queueStatus.paused.map((job) => (
-                          <div key={job.id} className="bg-amber-950/30 border border-amber-500/40 rounded-sm p-2">
-                            <div className="flex items-center justify-between">
-                              <span className="font-mono text-xs text-amber-400 truncate max-w-[150px]">
-                                {job.original_filename || job.camera_id}
-                              </span>
-                              <span className="font-mono text-[10px] text-amber-500">{job.progress_pct}%</span>
+                              {/* Metadata row */}
+                              {(job.width || job.height || job.fps) && (
+                                <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-700/50">
+                                  {job.width && job.height && (
+                                    <span className="font-mono text-[10px] text-slate-500">{job.width}×{job.height}</span>
+                                  )}
+                                  {job.fps && (
+                                    <span className="font-mono text-[10px] text-slate-500">{Math.round(job.fps)}fps</span>
+                                  )}
+                                  {job.duration_sec && (
+                                    <span className="font-mono text-[10px] text-slate-500">{Math.round(job.duration_sec)}s</span>
+                                  )}
+                                </div>
+                              )}
                             </div>
-                            <button
-                              onClick={() => resumeJob(job.id)}
-                              className="w-full mt-1 px-2 py-1 font-mono text-[10px] rounded-sm border border-green-500/60 text-green-400 hover:bg-green-950/30"
-                            >
-                              ▶ RESUME
-                            </button>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
-                    </div>
-                  )}
+                    ) : (
+                      /* Empty State */
+                      <div className="flex flex-col items-center gap-3 py-8">
+                        <div className="w-12 h-12 rounded-full border border-slate-700 bg-slate-800 flex items-center justify-center">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-6 h-6 text-slate-600">
+                            <path d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                            <path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                        </div>
+                        <span className="font-mono text-sm text-slate-500">Queue is empty</span>
+                      </div>
+                    );
+                  })()}
 
-                  {/* Completed Jobs */}
+                  {/* Clear completed button at bottom if there are completed jobs */}
                   {queueStatus && queueStatus.completed.length > 0 && (
-                    <div className="mb-4">
-                      <div className="flex items-center justify-between mb-2">
-                        <div className="text-xs font-mono text-slate-400">Completed ({queueStatus.completed.length})</div>
-                        <button
-                          onClick={clearCompleted}
-                          className="font-mono text-[10px] text-slate-500 hover:text-red-400"
-                        >
-                          Clear
-                        </button>
-                      </div>
-                      <div className="space-y-1 max-h-20 overflow-y-auto">
-                        {queueStatus.completed.slice(0, 3).map((job) => (
-                          <div key={job.id} className="bg-green-950/20 border border-green-500/20 rounded-sm p-2">
-                            <span className="font-mono text-xs text-green-400 truncate block">
-                              ✓ {job.original_filename || job.camera_id}
-                            </span>
-                            <span className="font-mono text-[10px] text-slate-500">
-                              {job.detections_count} detections
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Empty State */}
-                  {(!queueStatus ||
-                    (queueStatus.queue.length === 0 &&
-                      !queueStatus.current_job &&
-                      queueStatus.paused.length === 0 &&
-                      queueStatus.completed.length === 0)) && (
-                    <div className="flex flex-col items-center gap-3 py-8">
-                      <div className="w-12 h-12 rounded-full border border-slate-700 bg-slate-800 flex items-center justify-center">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-6 h-6 text-slate-600">
-                          <path d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-                          <path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                      </div>
-                      <span className="font-mono text-sm text-slate-500">Queue is empty</span>
+                    <div className="mt-3 flex items-center justify-between">
+                      <span className="font-mono text-[10px] text-slate-500">
+                        {queueStatus.completed.length} completed
+                      </span>
+                      <button
+                        onClick={clearCompleted}
+                        className="font-mono text-[10px] text-slate-500 hover:text-red-400"
+                      >
+                        Clear All
+                      </button>
                     </div>
                   )}
                 </>
@@ -1478,7 +1773,7 @@ export default function RealtimeTab() {
                 </>
               )}
             </div>
-            <div className="mt-3 flex items-center justify-between">
+            {/* <div className="mt-3 flex items-center justify-between">
               {activeTab === "queue" ? (
                 <>
                   <span className="font-mono text-xs text-slate-500">
@@ -1496,7 +1791,7 @@ export default function RealtimeTab() {
                   {isStreaming && <span className="font-mono text-xs text-yellow-400 animate-pulse">PROCESSING</span>}
                 </>
               )}
-            </div>
+            </div> */}
           </SettingsCard>
         )}
 
