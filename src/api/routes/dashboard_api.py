@@ -11,6 +11,7 @@ import cv2
 import os
 import asyncio
 import sys
+import time
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
@@ -68,7 +69,14 @@ async def _process_stream_refactored(
             """Callback for MJPEG relay frame cache."""
             ok, jpeg = cv2.imencode(".jpg", frame)
             if ok:
-                stream_manager.update_frame(camera_id, jpeg.tobytes())
+                stream_manager.update_frame(camera_id, jpeg.tobytes(), frame_number)
+                if frame_number % 30 == 0:  # Log every 30 frames
+                    print(f"[FrameCallback] Stored frame {frame_number} for camera {camera_id}, size: {len(jpeg.tobytes())} bytes")
+                    # Test if frame is retrievable
+                    test_frame = stream_manager.get_frame(camera_id)
+                    print(f"[FrameCallback] Test retrieval: {'SUCCESS' if test_frame else 'FAILED'}")
+            else:
+                print(f"[FrameCallback] Failed to encode frame {frame_number} for camera {camera_id}")
 
         # Start stream
         await stream_mgr.start_stream(
@@ -77,7 +85,7 @@ async def _process_stream_refactored(
             on_detection=on_detection,
             on_frame=on_frame,
             stop_event=stop_event,
-            frame_skip=5,
+            frame_skip=3,
         )
 
         print(f"[DashboardAPI] Stream {camera_id} started with refactored StreamProcessor")
@@ -92,7 +100,7 @@ async def _process_stream_refactored(
 router = APIRouter()
 
 MINIO_BASE = os.getenv("MINIO_BASE_URL", "http://myserver:9000")
-
+print(f"[DEBUG] MINIO_BASE_URL forced to: {MINIO_BASE}")
 # ─── Cameras ──────────────────────────────────────────────────────────────────
 
 @router.get("/cameras")
@@ -165,10 +173,9 @@ _MJPEG_CACHE: dict[str, str] = {}   # camera_id → rtsp_url (cached from DB)
 
 def _get_rtsp_url(camera_id: str) -> str | None:
     """Look up the RTSP stream URL for a camera_id from the DB (or int for webcam)."""
-    if camera_id in _MJPEG_CACHE:
-        return _MJPEG_CACHE[camera_id]
     try:
         db = DatabaseService()
+        db._ensure_connection()
         with db.conn.cursor() as cur:
             cur.execute("SELECT source_url FROM cameras WHERE id = %s", (camera_id,))
             row = cur.fetchone()
@@ -185,24 +192,95 @@ async def _mjpeg_generator(source: str, camera_id: str) -> AsyncGenerator[bytes,
     loop = asyncio.get_event_loop()
 
     # If AI processing is active for this camera, stream from the global cache
+    print(f"[DEBUG] Camera {camera_id} in _ACTIVE_STREAMS: {camera_id in _ACTIVE_STREAMS}")
+    print(f"[DEBUG] Active streams: {list(_ACTIVE_STREAMS.keys())}")
     if camera_id in _ACTIVE_STREAMS:
+        print(f"[MJPEG] Starting stream for camera {camera_id}, AI processing active")
+        frame_count = 0
+        start_time = time.time()
+        last_log_time = time.time()
         while camera_id in _ACTIVE_STREAMS:
-            frame_bytes = stream_manager.get_frame(camera_id)
-            if frame_bytes:
+            try:
+                frame_bytes = stream_manager.get_frame(camera_id)
+                if frame_bytes:
+                    frame_count += 1
+                    current_time = time.time()
+                    # Get frame number from stream manager
+                    frame_number = stream_manager.latest_frame_numbers.get(camera_id, frame_count)
+                    
+                    # Skip duplicate frames to avoid sending the same frame multiple times
+                    if not hasattr(stream_manager, '_last_sent_frame'):
+                        stream_manager._last_sent_frame = {}
+                    
+                    last_frame = stream_manager._last_sent_frame.get(camera_id)
+                    if frame_number == last_frame:
+                        # Skip duplicate frame - log occasionally
+                        if frame_count % 30 == 0:
+                            print(f"[MJPEG] Skipping duplicate frame #{frame_number} for camera {camera_id}")
+                        await asyncio.sleep(1 / 15)  # 15 FPS
+                        continue
+                    
+                    # Update last sent frame
+                    stream_manager._last_sent_frame[camera_id] = frame_number
+                    
+                    # Debug: Log when new frame is sent
+                    if frame_count % 10 == 0:
+                        print(f"[MJPEG] Sending NEW frame #{frame_number} for camera {camera_id} (previous: {last_frame})")
+                    
+                    # Transmission timing
+                    trans_start = time.perf_counter()
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + frame_bytes
+                        + b"\r\n"
+                    )
+                    trans_time = (time.perf_counter() - trans_start) * 1000
+                    
+                    # Log every frame that gets sent
+                    timestamp = time.strftime("%H:%M:%S", time.localtime())
+                    print(f"[{timestamp}] Frame #{frame_number} sent to frontend, transmission time: {trans_time:.2f}ms, size: {len(frame_bytes)} bytes, FPS: ~{frame_count/(time.time()-start_time+0.1):.1f}")
+                else:
+                    # No frame available yet
+                    if frame_count == 0:  # Log only once at start
+                        print(f"[MJPEG] Waiting for first frame for camera {camera_id}...")
+                        start_time = time.time()
+                    
+                    # Check if AI processing is still active
+                    if camera_id not in _ACTIVE_STREAMS:
+                        print(f"[MJPEG] Camera {camera_id} no longer in active streams, stopping generator")
+                        return
+                    
+                    # If no new frames for 10 seconds, stop the stream
+                    no_frame_time = time.time() - current_time if 'current_time' in locals() else 0
+                    if no_frame_time > 10:
+                        print(f"[MJPEG] No new frames for {no_frame_time:.1f}s, stopping stream (AI processing likely stopped)")
+                        return
+                    
+                    # Log warning after 5 seconds
+                    if no_frame_time > 5:
+                        print(f"[MJPEG] No new frames for {no_frame_time:.1f}s, AI processing may have stopped")
+                    
+                    await asyncio.sleep(1 / 30)  # Shorter sleep when waiting for frames
+                    continue
+                await asyncio.sleep(1 / 15)  # 15 FPS for better performance
+            except Exception as e:
+                print(f"[MJPEG] ❌ Error in MJPEG generator for camera {camera_id}: {e}")
+                # Send error frame to frontend
+                error_frame = b"ERROR: Stream interrupted"
                 yield (
                     b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n"
-                    + frame_bytes
+                    b"Content-Type: text/plain\r\n\r\n"
+                    + error_frame
                     + b"\r\n"
                 )
-            await asyncio.sleep(1 / 15)  # Yield loop heavily to prevent blocking
+                return
+        print(f"[MJPEG] Stream ended for camera {camera_id}, total frames: {frame_count}")
         return  # Exit when AI processing stops
                 
     # If not active, do not occupy the server. The frontend handles native playback.
+    print(f"[MJPEG] Camera {camera_id} not in active streams, not streaming")
     return
-    if not cap.isOpened():
-        cap.release()
-        return
 
 
 
@@ -212,10 +290,13 @@ async def mjpeg_stream(camera_id: str):
     Stream live MJPEG from the camera's source_url or from the global shared buffer if AI is processing.
     Browser just needs: <img src="/api/dashboard/mjpeg/{camera_id}">
     """
+    print(f"[MJPEG] Request received for camera {camera_id}")
+    
     source = _get_rtsp_url(camera_id)
     if source is None:
         raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' not found or has no source URL")
 
+    print(f"[MJPEG] Starting streaming response for camera {camera_id}")
     return StreamingResponse(
         _mjpeg_generator(source, camera_id),
         media_type="multipart/x-mixed-replace; boundary=frame",
@@ -226,6 +307,11 @@ async def mjpeg_stream(camera_id: str):
             "Connection": "close",
         }
     )
+
+    # Log MJPEG stream start
+    import time
+    timestamp = time.strftime("%H:%M:%S", time.localtime())
+    print(f"[{timestamp}] MJPEG stream started for camera {camera_id}")
 
 # ─── Prediction Controls ──────────────────────────────────────────────────────
 
@@ -257,46 +343,49 @@ async def start_prediction(camera_id: str, background_tasks: BackgroundTasks, re
     if not source:
         raise HTTPException(status_code=404, detail="Camera has no source URL")
 
-    # If it's a YouTube link, we extract the stream URL
-    if YOUTUBE_PATTERN.search(source):
-        try:
-            info = await asyncio.to_thread(_extract_youtube_stream, source)
-            stream_url = info["stream_url"]
-        except Exception as e:
-            raise HTTPException(status_code=422, detail=f"yt-dlp error: {e}")
-    else:
-        stream_url = source
-
+    # Use StreamProcessor singleton to avoid duplicate processing
+    from services.stream_processor import get_stream_processor
+    import time
+    
     stop_event = _register_stream(camera_id)
     
-    # Fetch latest video ID to support resume if requested
-    video_id = None
-    if resume:
-        db = DatabaseService()
-        video_id = db.get_latest_video_for_camera(camera_id)
-    
-    async def _task():
+    # Define callbacks
+    def on_detection(camera_id: str, detections: list, frame_number: int, frame_bytes: bytes):
+        """Handle detection results"""
         try:
-            print(f"[DashboardAPI] Using refactored StreamProcessor for {camera_id}")
-            await _process_stream_refactored(
-                stream_url=stream_url,
-                camera_id=camera_id,
-                video_id=video_id,
-                stop_event=stop_event,
-            )
+            print(f"[DEBUG] on_detection called for camera {camera_id}, frame #{frame_number}, detections: {len(detections)}")
+            # Store in global cache for MJPEG streaming
+            stream_manager.update_frame(camera_id, frame_bytes, frame_number)
+            stream_manager.update_detections(camera_id, detections)
+            
+            # Log detection summary
+            person_count = sum(1 for d in detections if d.get('class_name') == 'person')
+            if person_count > 0:
+                timestamp = time.strftime("%H:%M:%S", time.localtime())
+                print(f"[{timestamp}] {person_count} person(s) detected in frame #{frame_number}")
+                
         except Exception as e:
-            print(f"❌ Camera {camera_id} background task error: {e}")
-        finally:
-            _unregister_stream(camera_id)
-
-    # Use asyncio.create_task instead of FastAPI BackgroundTasks to ensure 
-    # it runs fully concurrently and doesn't starve the Starlette worker pool
-    asyncio.create_task(_task())
+            print(f"Detection callback error: {e}")
+    
+    def on_frame(frame, frame_number):
+        """Handle each frame"""
+        pass
+    
+    # Start stream using StreamProcessor singleton
+    processor_instance = await get_stream_processor()
+    processor = await processor_instance.start_stream(
+        camera_id=camera_id,
+        source=source,
+        on_detection=on_detection,
+        on_frame=on_frame,
+        stop_event=stop_event,
+        frame_skip=5,
+    )
+    
     return {
         "status": "success",
         "camera_id": camera_id,
-        "message": "Prediction started",
-        "using_refactored": True,
+        "message": "Prediction started using StreamProcessor"
     }
 
 # ─── Live Data API (Optional) ─────────────────────────────────────────────────

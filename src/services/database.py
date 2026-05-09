@@ -2,6 +2,11 @@ import psycopg2
 from psycopg2.extras import Json
 import os
 from dotenv import load_dotenv
+import sys
+from pathlib import Path
+
+# Add parent directory for config
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 load_dotenv()
 
@@ -12,20 +17,35 @@ class DatabaseService:
 
     def connect(self):
         try:
-            self.conn = psycopg2.connect(
-                host=os.getenv("DB_HOST"),
-                port=os.getenv("DB_PORT"),
-                database=os.getenv("DB_NAME"),
-                user=os.getenv("DB_USER"),
-                password=os.getenv("DB_PASS")
-            )
+            # Try environment variables first (for backward compatibility)
+            if os.getenv("DB_HOST"):
+                self.conn = psycopg2.connect(
+                    host=os.getenv("DB_HOST"),
+                    port=os.getenv("DB_PORT"),
+                    database=os.getenv("DB_NAME"),
+                    user=os.getenv("DB_USER"),
+                    password=os.getenv("DB_PASS")
+                )
+            else:
+                # Use system_settings.json configuration
+                from config_loader import load_config
+                config = load_config()
+                db_config = config["database"]
+                self.conn = psycopg2.connect(
+                    host=db_config["host"],
+                    port=db_config["port"],
+                    database=db_config["name"],
+                    user=db_config["user"],
+                    password=db_config["password"]
+                )
+            
             self.conn.autocommit = True
             print("✅ Database Connected!")
             self.setup_tables()
         except Exception as e:
             print(f"\n❌ FATAL ERROR: Database Connection Failed")
             print(f"   Error Details: {e}")
-            print("   👉 คำแนะนำ: เช็คไฟล์ .env อีกครั้ง (User, Password, Database Name)\n")
+            print("   👉 คำแนะนำ: เช็ค database configuration ใน config/system_settings.json หรือ environment variables\n")
             self.conn = None
 
     def _ensure_connection(self):

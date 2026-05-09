@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from collections import defaultdict
 import sys
+import subprocess
+import tempfile
 
 import numpy as np
 import cv2
@@ -56,6 +58,8 @@ from services.frame_processor import FrameProcessor
 # Type aliases
 DetectionCallback = Callable[[PersonDetection, int], None]  # (detection, frame_number)
 FrameCallback = Callable[[np.ndarray, int], None]  # (frame, frame_number)
+
+
 
 
 class StreamProcessor:
@@ -123,6 +127,9 @@ class StreamProcessor:
                 self._storage = StorageService()
             except Exception as e:
                 print(f"[StreamProcessor] Storage service initialization failed: {e}")
+        
+        # Store last detections for bbox inheritance
+        self._last_detections = []
     
     def stop_stream(self):
         """
@@ -187,9 +194,7 @@ class StreamProcessor:
         # Resolve source
         resolved_source = self._resolve_source(source)
         
-        print(f"[StreamProcessor] Starting stream for {stream_camera_id}")
-        print(f"[StreamProcessor] Source: {source}")
-        print(f"[StreamProcessor] Frame skip: {stream_frame_skip}")
+        print(f"[StreamProcessor] Starting stream for {stream_camera_id} (skip: {stream_frame_skip})")
         
         # Update internal camera_id for this session
         self.camera_id = stream_camera_id
@@ -197,9 +202,22 @@ class StreamProcessor:
         try:
             loop = asyncio.get_running_loop()
 
-            # Open video capture. OpenCV calls can block for network streams, so
-            # keep them off the FastAPI event loop.
-            cap = await loop.run_in_executor(None, cv2.VideoCapture, resolved_source)
+            # Handle YouTube live streams specially
+            if isinstance(resolved_source, str) and resolved_source.startswith("YOUTUBE_LIVE:"):
+                youtube_url = resolved_source.replace("YOUTUBE_LIVE:", "")
+                print(f"[StreamProcessor] Processing YouTube live stream: {youtube_url}")
+                # For YouTube live streams, we'll use a different approach
+                # Try to get a working direct stream URL periodically
+                cap = await self._create_youtube_live_capture(youtube_url, loop)
+            elif hasattr(resolved_source, 'stdout'):
+                # FFmpeg subprocess - use stdout as video source
+                import numpy as np
+                print(f"[StreamProcessor] Using FFmpeg subprocess as video source")
+                cap = cv2.VideoCapture(resolved_source.stdout.fileno())
+            else:
+                # Regular URL or file
+                cap = await loop.run_in_executor(None, cv2.VideoCapture, resolved_source)
+            
             if not await loop.run_in_executor(None, cap.isOpened):
                 raise ValueError(f"Cannot open stream source: {source}")
             
@@ -212,8 +230,7 @@ class StreamProcessor:
             self._stats.image_width = width
             self._stats.image_height = height
             
-            print(f"[StreamProcessor] Stream opened: {width}x{height} @ {float(fps):.2f}fps")
-            
+                        
             # Initialize database if needed
             db = None
             if should_save_db:
@@ -224,14 +241,39 @@ class StreamProcessor:
                     print(f"[StreamProcessor] Database initialization failed: {e}")
                     db = None
             
+            # Record start time for URL to first frame timing
+            stream_start_time = time.time()
+            print(f"[StreamProcessor] ⏱️ Stream processing started at {stream_start_time:.3f} for camera {self.camera_id}")
+            
             # Main processing loop
             consecutive_errors = 0
             max_consecutive_errors = 10
+            first_frame_captured = False
             
             while not self._stop_event.is_set():
                 try:
                     # Read frame
-                    ret, frame = await loop.run_in_executor(None, cap.read)
+                    cv2_start = time.perf_counter()
+                    if hasattr(resolved_source, 'stdout'):
+                        # FFmpeg subprocess - read raw frames
+                        import numpy as np
+                        raw_bytes = resolved_source.stdout.read(width * height * 3)
+                        if len(raw_bytes) == width * height * 3:
+                            frame = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((height, width, 3))
+                            ret = True
+                        else:
+                            ret = False
+                            frame = None
+                    else:
+                        # Regular capture
+                        ret, frame = await loop.run_in_executor(None, cap.read)
+                    
+                    cv2_time = (time.perf_counter() - cv2_start) * 1000
+                    
+                    if ret and not first_frame_captured:
+                        first_frame_captured = True
+                        url_to_frame_time = (time.time() - stream_start_time) * 1000
+                        print(f"[StreamProcessor] 🎯 FIRST FRAME CAPTURED: Frame {self._frame_count}, CV2 capture: {cv2_time:.2f}ms, URL to first frame: {url_to_frame_time:.2f}ms")
                     
                     if not ret:
                         # Failed to read frame
@@ -255,11 +297,23 @@ class StreamProcessor:
                     
                     # Skip frames (only process every Nth frame)
                     if self._frame_count % stream_frame_skip != 0:
+                        # For skipped frames, draw inherited boxes from last detection
+                        if hasattr(self, '_last_detections') and self._last_detections:
+                            self._draw_inherited_boxes(frame, self._last_detections)
+                        
+                        # Still send frame to MJPEG for smooth streaming
+                        if on_frame:
+                            try:
+                                on_frame(frame, self._frame_count)
+                            except Exception as e:
+                                print(f"[StreamProcessor] Frame callback error: {e}")
                         continue
                     
                     # Process frame
+                    process_start = time.perf_counter()
                     try:
                         result = await self._process_frame(frame, self._frame_count)
+                        process_time = (time.perf_counter() - process_start) * 1000
                         
                         # Update stats
                         self._stats.processed_frames += 1
@@ -271,8 +325,11 @@ class StreamProcessor:
                             except Exception as e:
                                 print(f"[StreamProcessor] Frame callback error: {e}")
                         
-                        # Handle detections
+                        # Handle detections and store for inheritance
                         if result.detections:
+                            # Store latest detections for inheritance
+                            self._last_detections = result.detections
+                            
                             for person in result.detections:
                                 # Update stats
                                 self._stats.num_persons_detected += 1
@@ -319,6 +376,14 @@ class StreamProcessor:
                                     
                                     self._add_to_batch(person, self._frame_count, image_path)
                         
+                        # Handle frame callback AFTER detections are processed
+                        # This ensures detection boxes are drawn on the frame before MJPEG streaming
+                        if on_frame:
+                            try:
+                                on_frame(frame, self._frame_count)
+                            except Exception as e:
+                                print(f"[StreamProcessor] Frame callback error: {e}")
+                        
                         # Save batch to database periodically
                         if len(self._detection_batch) >= self.batch_size:
                             await self._flush_batch(db)
@@ -328,9 +393,13 @@ class StreamProcessor:
                         self._stats.num_errors += 1
                 
                 except Exception as e:
-                    print(f"[StreamProcessor] Loop error: {e}")
+                    print(f"[StreamProcessor] Frame read/processing error: {e}")
+                    consecutive_errors += 1
                     self._stats.num_errors += 1
-                    await asyncio.sleep(0.1)  # Brief pause on error
+                    
+                    # Brief pause before retry
+                    await asyncio.sleep(0.1)
+                    continue
             
             # Cleanup
             await loop.run_in_executor(None, cap.release)
@@ -370,21 +439,268 @@ class StreamProcessor:
             self._stop_event.set()
             print(f"[StreamProcessor] Stop requested for {self.camera_id}")
     
-    def _resolve_source(self, source: str) -> str or int:
-        """
-        Resolve stream source.
-        
-        Args:
-            source: Original source string (RTSP URL or webcam index)
-        
-        Returns:
-            Resolved source (string for RTSP, int for webcam)
-        """
+    def _resolve_source(self, source: str) -> str:
+        print(f"[StreamProcessor] Resolving source: {source}")
         # Check if it's a webcam index
         if isinstance(source, str) and source.isdigit():
             return int(source)
         
+        # Check if it's a YouTube URL (handle directly)
+        if 'youtube.com/watch?v=' in source:
+            print(f"[StreamProcessor] Processing YouTube URL directly")
+            try:
+                direct_url = self._extract_direct_stream(source)
+                if direct_url and direct_url != source:
+                    print(f"[StreamProcessor] Using direct stream for YouTube")
+                    # If it's still an HLS URL, try to get a better format
+                    if '.m3u8' in direct_url or 'manifest.googlevideo.com' in direct_url:
+                        return self._get_youtube_direct_video(source)
+                    return direct_url
+            except Exception as e:
+                print(f"[StreamProcessor] YouTube extraction failed: {e}")
+            raise ValueError(f"Cannot resolve YouTube URL: {source}")
+        
+        # Check if it's an HLS stream (YouTube manifest, .m3u8)
+        if '.m3u8' in source or 'manifest.googlevideo.com' in source:
+            # Try to get original YouTube URL first
+            original_url = self._get_original_youtube_url(source)
+            if original_url and original_url != source:
+                print(f"[StreamProcessor] Using original YouTube URL")
+                # Recursively resolve the YouTube URL
+                return self._resolve_source(original_url)
+            
+            # Try yt-dlp extraction
+            try:
+                direct_url = self._extract_direct_stream(source)
+                if direct_url and direct_url != source:
+                    print(f"[StreamProcessor] Using direct stream for HLS")
+                    return direct_url
+            except Exception as e:
+                print(f"[StreamProcessor] HLS extraction failed")
+            
+            raise ValueError(f"Cannot resolve stream source: {source}")
+        
         return source
+        
+    def _extract_direct_stream(self, url: str) -> str:
+        print(f"[StreamProcessor] Attempting yt-dlp extraction for: {url}")
+
+        """
+        Extract direct MP4 stream URL using yt-dlp.
+        
+        Args:
+            url: HLS stream URL or YouTube URL
+            
+        Returns:
+            Direct MP4 stream URL or original URL if extraction fails
+        """
+        print(f"[StreamProcessor] Attempting yt-dlp extraction for: {url}")
+        
+        # Store original URL for fallback
+        original_url = url
+        try:
+            import yt_dlp
+            print(f"[StreamProcessor] yt-dlp imported successfully")
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "format": "best[protocol!=http_dash_segments]/best",
+                "noplaylist": True,
+                "extract_flat": False,
+                "no_check_certificates": True,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                print(f"[StreamProcessor] yt-dlp extracted info: {bool(info)}")
+
+                if not info:
+                    print(f"[StreamProcessor] yt-dlp failed to extract info")
+
+                    return original_url
+                
+                # For live streams, try to get the best direct URL
+                if info.get("is_live", False):
+                    # Live stream - look for direct video URLs
+                    formats = info.get("formats", [])
+                    
+                    # Find formats with direct URLs (not HLS)
+                    direct_formats = []
+                    for i, f in enumerate(formats[:3]):  # Show first 3 formats
+                        format_url = f.get("url", "")
+                        vcodec = f.get("vcodec", "none")
+                        acodec = f.get("acodec", "none")
+                        height = f.get("height", "unknown")
+                        print(f"[StreamProcessor] Format {i}: height={height}, vcodec={vcodec}, acodec={acodec}, url_length={len(format_url)}")
+
+                        # Add to direct_formats if it meets criteria
+                        # แทนที่จะ reject .m3u8 ให้ใช้ FFmpeg pipe
+                        if (format_url and 
+                            vcodec != "none" and
+                            acodec != "none"):
+                            
+                            if format_url.endswith('.m3u8'):
+                                # Use FFmpeg subprocess for HLS
+                                direct_formats.append({'url': format_url, 'height': height, 'use_ffmpeg': True})
+                                print(f"[StreamProcessor] Added format {i} with FFmpeg for HLS")
+                            elif not 'manifest.googlevideo.com' in format_url:
+                                direct_formats.append(f)
+                                print(f"[StreamProcessor] Added format {i} to direct_formats")
+                                
+                    if direct_formats:
+                        # Sort by quality (height)
+                        direct_formats.sort(key=lambda x: x.get("height", 0), reverse=True)
+                        best_format = direct_formats[0]
+                        
+                        # If needs FFmpeg, get direct video URL instead
+                        if best_format.get('use_ffmpeg'):
+                            print(f"[StreamProcessor] HLS detected, getting direct video URL")
+                            return self._get_youtube_direct_video(original_url)
+                        
+                        return best_format["url"]
+                else:
+                    # Regular video - get the best format
+                    stream_url = info.get("url") or (
+                        info["requested_downloads"][0]["url"] if info.get("requested_downloads") else None
+                    )
+                    
+                    if stream_url and stream_url != url and not stream_url.endswith('.m3u8'):
+                        return stream_url
+                
+                # Last resort: try any format that's not HLS
+                formats = info.get("formats", [])
+                for f in formats:
+                    format_url = f.get("url", "")
+                    if (format_url and 
+                        not format_url.endswith('.m3u8') and 
+                        not 'manifest.googlevideo.com' in format_url and
+                        f.get("vcodec") != "none"):
+                        return format_url
+                
+        except ImportError:
+            print("[StreamProcessor] yt-dlp not available")
+        except Exception as e:
+            print(f"[StreamProcessor] yt-dlp error: {e}")
+        
+        # Fallback: Use FFmpeg pipe with first available format
+        try:
+            import yt_dlp
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "format": "best[protocol!=http_dash_segments]/best",
+                "noplaylist": True,
+                "extract_flat": False,
+                "no_check_certificates": True,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                formats = info.get("formats", [])
+                
+                if formats:
+                    first_url = formats[0].get("url", "")
+                    if first_url:
+                        print(f"[StreamProcessor] Using direct URL fallback for OpenCV")
+                        return first_url
+        except Exception as e:
+            print(f"[StreamProcessor] FFmpeg fallback failed: {e}")
+        
+        return original_url
+    
+    def _get_youtube_direct_video(self, youtube_url: str) -> str:
+        """
+        Get a direct YouTube video URL that works with OpenCV.
+        For live streams, this returns a special marker to use alternative processing.
+        """
+        try:
+            import yt_dlp
+            ydl_opts = {
+                "quiet": True,
+                "no_warnings": True,
+                "format": "best[ext=mp4]/best[height<=720]/best",
+                "noplaylist": True,
+                "extract_flat": False,
+                "no_check_certificates": True,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(youtube_url, download=False)
+                
+                if info:
+                    # Check if it's a live stream
+                    if info.get("is_live", False):
+                        print(f"[StreamProcessor] YouTube live stream detected - using alternative approach")
+                        # For live streams, we'll use a different approach in the main stream processing
+                        return f"YOUTUBE_LIVE:{youtube_url}"
+                    
+                    formats = info.get("formats", [])
+                    
+                    # Find MP4 formats that are not HLS
+                    mp4_formats = []
+                    for f in formats:
+                        url = f.get("url", "")
+                        vcodec = f.get("vcodec", "none")
+                        height = f.get("height", 0)
+                        
+                        # Prefer MP4 formats with direct URLs
+                        if (url and 
+                            vcodec != "none" and
+                            not url.endswith('.m3u8') and
+                            not 'manifest.googlevideo.com' in url and
+                            height > 0):
+                            
+                            mp4_formats.append({
+                                'url': url,
+                                'height': height,
+                                'format': f
+                            })
+                    
+                    if mp4_formats:
+                        # Sort by quality (height)
+                        mp4_formats.sort(key=lambda x: x['height'], reverse=True)
+                        best = mp4_formats[0]
+                        print(f"[StreamProcessor] Found MP4 format: {best['height']}p")
+                        return best['url']
+                    
+                    # Fallback: try any format that's not HLS
+                    for f in formats:
+                        url = f.get("url", "")
+                        if (url and 
+                            not url.endswith('.m3u8') and 
+                            not 'manifest.googlevideo.com' in url and
+                            f.get("vcodec") != "none"):
+                            print(f"[StreamProcessor] Using fallback format")
+                            return url
+                            
+        except Exception as e:
+            print(f"[StreamProcessor] Direct video extraction failed: {e}")
+        
+        # Last resort - return the original URL to trigger the error
+        return youtube_url
+    
+    def _get_original_youtube_url(self, manifest_url: str) -> str:
+        """
+        Try to extract the original YouTube video URL from a manifest URL.
+        This works by extracting video ID from manifest parameters.
+        """
+        try:
+            # Extract video ID from manifest URL
+            import re
+            
+            # Look for video ID pattern in the manifest URL
+            video_id_match = re.search(r'/id/([A-Za-z0-9_\-]+)', manifest_url)
+            if video_id_match:
+                video_id = video_id_match.group(1)
+                original_url = f"https://www.youtube.com/watch?v={video_id}"
+                print(f"[StreamProcessor] Extracted YouTube URL: {original_url}")
+                print(f"[StreamProcessor] Original URL type: {type(original_url)}")
+                return original_url
+            
+        except Exception:
+            pass
+        
+        return manifest_url
     
     async def _process_frame(self, frame: np.ndarray, frame_number: int) -> AIProcessingResult:
         """
@@ -468,15 +784,17 @@ class StreamProcessor:
                 })
             
             # Use executemany for batch insert (runs in thread pool to avoid blocking)
+            db_start = time.perf_counter()
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(
                 None,  # Default executor
                 db.insert_detections_batch,
                 batch_data
             )
+            db_time = (time.perf_counter() - db_start) * 1000
             
             self._stats.num_detections_saved += len(self._detection_batch)
-            print(f"[StreamProcessor] Batch inserted {len(self._detection_batch)} detections")
+            print(f"[StreamProcessor] Batch inserted {len(self._detection_batch)} detections in {db_time:.2f}ms")
             
         except Exception as e:
             print(f"[StreamProcessor] Database batch insert error: {e}")
@@ -503,6 +821,99 @@ class StreamProcessor:
             True if running, False otherwise
         """
         return self._is_running
+    
+    async def _create_youtube_live_capture(self, youtube_url: str, loop):
+        """
+        Create a video capture for YouTube live streams with retry logic.
+        This tries different approaches to get a working stream.
+        """
+        import yt_dlp
+        
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                print(f"[StreamProcessor] YouTube live attempt {attempt + 1}/{max_attempts}")
+                
+                # Try to get a direct video URL that might work
+                ydl_opts = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "format": "best[height<=720]/best",
+                    "noplaylist": True,
+                    "extract_flat": False,
+                    "no_check_certificates": True,
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(youtube_url, download=False)
+                    
+                    if info:
+                        formats = info.get("formats", [])
+                        
+                        # Try each format in order of preference
+                        for f in formats:
+                            url = f.get("url", "")
+                            vcodec = f.get("vcodec", "none")
+                            height = f.get("height", 0)
+                            
+                            if (url and 
+                                vcodec != "none" and
+                                height > 0 and
+                                height <= 720):  # Limit to 720p for performance
+                                
+                                print(f"[StreamProcessor] Trying format: {height}p, vcodec={vcodec}")
+                                
+                                # Try to open this URL with OpenCV
+                                cap = await loop.run_in_executor(None, cv2.VideoCapture, url)
+                                
+                                if await loop.run_in_executor(None, cap.isOpened):
+                                    print(f"[StreamProcessor] ✅ Successfully opened YouTube live stream at {height}p")
+                                    return cap
+                                else:
+                                    await loop.run_in_executor(None, cap.release)
+                                    print(f"[StreamProcessor] ❌ Failed to open {height}p format")
+                
+                print(f"[StreamProcessor] Attempt {attempt + 1} failed")
+                
+                if attempt < max_attempts - 1:
+                    # Wait before retry
+                    await asyncio.sleep(2)
+                    
+            except Exception as e:
+                print(f"[StreamProcessor] YouTube live attempt {attempt + 1} error: {e}")
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(2)
+        
+        # If all attempts failed, raise an error
+        raise ValueError(f"Cannot open YouTube live stream after {max_attempts} attempts: {youtube_url}")
+    
+    def _draw_inherited_boxes(self, frame: np.ndarray, detections: List[Any]):
+        """
+        Draw inherited bounding boxes on frame for skipped frames.
+        
+        Args:
+            frame: OpenCV frame to draw on
+            detections: List of detection objects from last processed frame
+        """
+        try:
+            import cv2
+            
+            for detection in detections:
+                if hasattr(detection, 'bbox') and detection.bbox:
+                    bbox = detection.bbox
+                    # Draw bounding box
+                    cv2.rectangle(frame, 
+                               (int(bbox.x), int(bbox.y)), 
+                               (int(bbox.x + bbox.width), int(bbox.y + bbox.height)), 
+                               (0, 255, 0), 2)  # Green color
+                    
+                    # Add label
+                    if hasattr(detection, 'track_id') and detection.track_id:
+                        cv2.putText(frame, f"ID: {detection.track_id}", 
+                                   (int(bbox.x), int(bbox.y - 10)), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        except Exception as e:
+            print(f"[StreamProcessor] Error drawing inherited boxes: {e}")
 
 
 # ==============================================================================
@@ -684,3 +1095,22 @@ async def get_global_stream_manager(
                 _global_stream_manager = StreamManager(thread_pool)
     
     return _global_stream_manager
+
+
+# Global singleton instance
+stream_processor = None
+
+async def get_stream_processor():
+    """Get or create global stream processor singleton"""
+    global stream_processor
+    print(f"[DEBUG] get_stream_processor called, stream_processor is None: {stream_processor is None}")
+    if stream_processor is None:
+        print(f"[DEBUG] Creating new StreamProcessor instance")
+        from services.thread_pool_processor import ThreadPoolProcessor
+        thread_pool = ThreadPoolProcessor(max_workers=4)
+        await thread_pool.initialize()
+        stream_processor = StreamManager(thread_pool)
+        print(f"[DEBUG] StreamProcessor instance created: {id(stream_processor)}")
+    else:
+        print(f"[DEBUG] Returning existing StreamProcessor instance: {id(stream_processor)}")
+    return stream_processor

@@ -26,6 +26,7 @@ dependencies = [
     "transformers",
     "olefile>=0.47",
     "moviepy>=2.2.1",
+    "ffmpeg>=1.4",
 ]
 
 [[tool.uv.index]]

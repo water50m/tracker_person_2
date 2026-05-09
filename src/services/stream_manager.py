@@ -9,17 +9,28 @@ class StreamManager:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance.latest_frames: Dict[str, bytes] = {}
+            cls._instance.latest_frame_numbers: Dict[str, int] = {}
             cls._instance.latest_detections: Dict[str, list] = {}
             cls._instance.pause_prediction: Dict[str, bool] = {}
         return cls._instance
 
-    def update_frame(self, camera_id: str, frame_bytes: bytes):
+    def update_frame(self, camera_id: str, frame_bytes: bytes, frame_number: int = 0):
         """Update the latest JPEG frame for a camera"""
+        import time
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        print(f"[{timestamp}] Frame #{frame_number} stored for camera {camera_id}, size: {len(frame_bytes)} bytes")
         self.latest_frames[camera_id] = frame_bytes
+        self.latest_frame_numbers[camera_id] = frame_number
         
     def get_frame(self, camera_id: str) -> Optional[bytes]:
         """Get the latest JPEG frame"""
-        return self.latest_frames.get(camera_id)
+        frame = self.latest_frames.get(camera_id)
+        frame_number = self.latest_frame_numbers.get(camera_id, 0)
+        if frame:
+            import time
+            timestamp = time.strftime("%H:%M:%S", time.localtime())
+            print(f"[{timestamp}] Frame #{frame_number} retrieved for camera {camera_id}, size: {len(frame)} bytes")
+        return frame
 
     def update_detections(self, camera_id: str, detections: list):
         """Update the latest detection data for API/Interactive use"""
@@ -32,6 +43,7 @@ class StreamManager:
     def clear_camera(self, camera_id: str):
         """Clean up when stream stops"""
         self.latest_frames.pop(camera_id, None)
+        self.latest_frame_numbers.pop(camera_id, None)
         self.latest_detections.pop(camera_id, None)
         self.pause_prediction.pop(camera_id, None)
         

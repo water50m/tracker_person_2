@@ -1,5 +1,12 @@
 {
   "_comment": "System configuration file. Edit this file to change settings.",
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "name": "myproject",
+    "user": "postgres",
+    "password": "postgres"
+  },
   "paths": {
     "upload_dir": "uploads",
     "output_dir": "output",

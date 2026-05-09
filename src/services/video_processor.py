@@ -641,14 +641,28 @@ class VideoProcessor:
                         continue
                     frame_number += 1
                 
-                # Process frame
+                # Process frame with stop event checking
                 try:
-                    result = await self._process_frame(frame, frame_number)
+                    result = await self._process_frame_with_timeout(
+                        frame, frame_number, stop_event=stop_event, timeout=3.0
+                    )
+                    
+                    # Check if stopped during processing
+                    if result.status == ProcessingStatus.STOPPED:
+                        print(f"[VideoProcessor] Processing stopped at frame {frame_number}")
+                        self._stats.status = ProcessingStatus.STOPPED
+                        break
+                    
                     processed_count += 1
                     
                     # Handle detections
                     if result.detections:
-                        for person in result.detections:
+                        for idx, person in enumerate(result.detections):
+                            # Check stop event periodically during detection handling
+                            if stop_event and stop_event.is_set():
+                                print(f"[VideoProcessor] Stop requested during detection processing at frame {frame_number}")
+                                self._stats.status = ProcessingStatus.STOPPED
+                                break
                             # Update stats
                             self._stats.num_persons_detected += 1
                             
@@ -847,6 +861,72 @@ class VideoProcessor:
         
         return source
     
+    async def _process_frame_with_timeout(
+        self, 
+        frame: np.ndarray, 
+        frame_number: int,
+        stop_event: Optional[asyncio.Event] = None,
+        timeout: float = 5.0
+    ) -> AIProcessingResult:
+        """
+        Process a single frame with periodic stop checks.
+        
+        Uses timeout to allow checking stop event periodically.
+        If processing times out, it will retry until complete or stopped.
+        
+        Args:
+            frame: OpenCV frame
+            frame_number: Frame number
+            stop_event: Optional stop event to check
+            timeout: Timeout per attempt in seconds
+        
+        Returns:
+            AIProcessingResult
+        """
+        start_time = time.time()
+        max_total_time = 60.0  # Maximum 60 seconds total per frame
+        
+        while True:
+            # Check if we should stop
+            if stop_event and stop_event.is_set():
+                return AIProcessingResult(
+                    status=ProcessingStatus.STOPPED,
+                    frame_number=frame_number,
+                    error_message="Processing stopped by request"
+                )
+            
+            # Check if we've exceeded max total time
+            if time.time() - start_time > max_total_time:
+                return AIProcessingResult(
+                    status=ProcessingStatus.TIMEOUT,
+                    frame_number=frame_number,
+                    error_message=f"Processing exceeded {max_total_time}s limit"
+                )
+            
+            try:
+                # Try processing with timeout
+                result = await self.thread_pool.process_frame(
+                    frame,
+                    frame_number=frame_number,
+                    timestamp=time.time(),
+                    timeout=timeout,
+                )
+                
+                # If successful, return result
+                if result.status != ProcessingStatus.TIMEOUT:
+                    return result
+                
+                # If timed out but not stopped, retry
+                print(f"[VideoProcessor] Frame {frame_number} processing timed out, retrying...")
+                await asyncio.sleep(0.1)  # Brief pause before retry
+                
+            except Exception as e:
+                return AIProcessingResult(
+                    status=ProcessingStatus.ERROR,
+                    frame_number=frame_number,
+                    error_message=str(e)
+                )
+    
     async def _process_frame(self, frame: np.ndarray, frame_number: int) -> AIProcessingResult:
         """
         Process a single frame using ThreadPoolProcessor.
@@ -858,7 +938,7 @@ class VideoProcessor:
         Returns:
             AIProcessingResult
         """
-        # Use thread pool for processing
+        # Use thread pool for processing (backward compatibility)
         result = await self.thread_pool.process_frame(
             frame,
             frame_number=frame_number,

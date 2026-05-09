@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import HlsVideoPlayer from "./HlsVideoPlayer";
+import IPCameraPlayer from "./IPCameraPlayer";
 
 // ─── Types ────────────────────────────────────────────────────
 
@@ -35,6 +36,29 @@ function getYoutubeEmbedUrl(url: string): string | null {
   return null;
 }
 
+function isIPCameraUrl(url: string): boolean {
+  // Check for common IP camera protocols and patterns
+  const ipCameraPatterns = [
+    /^rtsp:\/\//i,                    // RTSP protocol
+    /^rtmp:\/\//i,                    // RTMP protocol  
+    /^http:\/\/.*\/mjpg/,             // MJPEG over HTTP
+    /^http:\/\/.*\/mjpeg/,            // MJPEG over HTTP (alternative)
+    /^http:\/\/.*\/video/,            // Common video endpoints (including IP Webcam)
+    /^http:\/\/.*\/stream/,           // Common stream endpoints
+    /^http:\/\/.*\/live/,             // Common live endpoints
+    /^http:\/\/.*\/cam/,              // Common camera endpoints
+    /:\d{4,5}/,                       // Port numbers (common for IP cameras)
+    /\/cgi-bin\/video/,               // Common CGI video endpoints
+    /\/onvif/,                        // ONVIF protocol
+    // IP Webcam app specific patterns
+    /:8080\/video/,                   // IP Webcam video stream
+    /:8080\/shot\.jpg/,               // IP Webcam single image
+    /ipwebcam/i,                      // IP Webcam app identifier
+  ];
+  
+  return ipCameraPatterns.some(pattern => pattern.test(url));
+}
+
 // ─── Component ────────────────────────────────────────────────
 
 export default function LiveVideoCanvas() {
@@ -45,9 +69,25 @@ export default function LiveVideoCanvas() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isStartingAI, setIsStartingAI] = useState(false);
   const [isStoppingAI, setIsStoppingAI] = useState(false);
+  const [frameTiming, setFrameTiming] = useState<string>("");
 
   const containerRef = useRef<HTMLDivElement>(null);
   const streamKeyRef = useRef<number>(Date.now()); // Used to force image reload if needed
+  const frameReceiveTimeRef = useRef<number>(Date.now()); // Track when frames are received
+  
+  // Stream error counter and connection management
+  const [streamErrorCounts, setStreamErrorCounts] = useState<Record<string, number>>({});
+
+  function setStreamErrorCount(cameraId: string, count: number) {
+    setStreamErrorCounts(prev => ({
+      ...prev,
+      [cameraId]: count
+    }));
+  }
+
+  function getStreamErrorCount(cameraId: string): number {
+    return streamErrorCounts[cameraId] || 0;
+  }
 
   // Fetch cameras
   useEffect(() => {
@@ -61,10 +101,24 @@ export default function LiveVideoCanvas() {
 
           setSelectedCamera(prevSelected => {
             if (!prevSelected) {
+              // Prioritize cameras that are actively processing
+              const processingCam = cams.find(c => c.is_processing);
+              if (processingCam) {
+                return processingCam;
+              }
               return cams.length > 0 ? cams[0] : null;
             }
             // Update the selected camera with fresh data from server (e.g. is_processing changed)
             const freshCam = cams.find(c => c.id === prevSelected.id);
+            
+            // If current camera is not processing but another is, switch to the processing one
+            if (!freshCam?.is_processing && !prevSelected.is_processing) {
+              const processingCam = cams.find(c => c.is_processing);
+              if (processingCam) {
+                return processingCam;
+              }
+            }
+            
             return freshCam || prevSelected;
           });
         }
@@ -308,9 +362,54 @@ export default function LiveVideoCanvas() {
                       src={`/api/dashboard/mjpeg/${selectedCamera.id}`}
                       alt="Live MJPEG Stream"
                       className="w-full h-full object-contain"
+                      onLoad={() => {
+                        const receiveTime = Date.now();
+                        const timeSinceLastFrame = receiveTime - frameReceiveTimeRef.current;
+                        frameReceiveTimeRef.current = receiveTime;
+                        
+                        const timingText = `Frame received: ${timeSinceLastFrame}ms`;
+                        setFrameTiming(timingText);
+                        console.log(`[LiveVideoCanvas] 📱 RECEIVED MJPEG frame for camera ${selectedCamera.id}, time since last: ${timeSinceLastFrame}ms`);
+                        
+                        // Reset connection error counter on successful load
+                        setStreamErrorCount(selectedCamera.id, 0);
+                      }}
                       onError={(e) => {
-                        e.currentTarget.style.display = 'none';
-                        e.currentTarget.parentElement?.classList.add('stream-error');
+                        console.error(`[LiveVideoCanvas] ❌ MJPEG stream error for camera ${selectedCamera.id}`, e);
+                        
+                        // Try to reload after network error
+                        const errorDetails = (e as any).message || (e as any).toString() || '';
+                        const errorCount = getStreamErrorCount(selectedCamera.id) + 1;
+                        setStreamErrorCount(selectedCamera.id, errorCount);
+                        
+                        // Check if camera is still processing
+                        if (selectedCamera.is_processing) {
+                          console.log(`[LiveVideoCanvas] 🔄 Stream error #${errorCount} for camera ${selectedCamera.id}, camera still processing, reloading in ${Math.min(1000 * errorCount, 5000)}ms...`);
+                          
+                          // Force reload by changing src with exponential backoff
+                          const img = e.currentTarget;
+                          const currentSrc = img.src;
+                          img.src = '';
+                          
+                          // Exponential backoff: 1s, 2s, 3s, 4s, 5s max
+                          const retryDelay = Math.min(1000 * errorCount, 5000);
+                          setTimeout(() => {
+                            // Add timestamp and error count to prevent caching
+                            const newSrc = currentSrc.split('?')[0] + `?t=${Date.now()}&retry=${errorCount}`;
+                            img.src = newSrc;
+                          }, retryDelay);
+                          
+                          // If too many errors, stop trying and show error
+                          if (errorCount >= 10) {
+                            console.error(`[LiveVideoCanvas] ❌ Too many connection errors (${errorCount}), stopping reload attempts for camera ${selectedCamera.id}`);
+                            e.currentTarget.style.display = 'none';
+                            e.currentTarget.parentElement?.classList.add('stream-error');
+                          }
+                        } else {
+                          console.log(`[LiveVideoCanvas] Camera ${selectedCamera.id} is no longer processing, stopping reload attempts`);
+                          e.currentTarget.style.display = 'none';
+                          e.currentTarget.parentElement?.classList.add('stream-error');
+                        }
                       }}
                     />
                   );
@@ -327,6 +426,11 @@ export default function LiveVideoCanvas() {
                       title="YouTube stream"
                     />
                   );
+                }
+
+                // Check for IP camera URLs
+                if (isIPCameraUrl(selectedCamera.source_url)) {
+                  return <IPCameraPlayer src={selectedCamera.source_url} className="w-full h-full" />;
                 }
 
                 // Other source types fallback (.m3u8 or .mp4)
@@ -421,6 +525,13 @@ export default function LiveVideoCanvas() {
             <div className="absolute bottom-3 left-3 bg-black/50 px-1.5 py-0.5 rounded font-mono text-[9px] text-slate-300 pointer-events-none border border-slate-800/50">
               <LiveTimestamp />
             </div>
+
+            {/* Frame timing display */}
+            {selectedCamera.is_processing && frameTiming && (
+              <div className="absolute top-3 right-3 bg-black/70 px-2 py-1 rounded font-mono text-[10px] text-cyan-400 pointer-events-none border border-cyan-800/50">
+                {frameTiming}
+              </div>
+            )}
           </>
         )}
       </div>

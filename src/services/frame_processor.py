@@ -144,7 +144,7 @@ class FrameProcessor:
         
         try:
             # Step 1: Person Detection
-            detections = self._detect_persons(frame)
+            detections = self._detect_persons(frame, frame_number)
             
             if not detections:
                 return AIProcessingResult(
@@ -194,15 +194,24 @@ class FrameProcessor:
     def _detect_persons(
         self,
         frame: np.ndarray,
+        frame_number: int = 0,
     ) -> List[Tuple[int, BoundingBox, float]]:
         """
-        Detect persons in the frame.
+        Detect persons in frame.
         
         Returns:
             List of tuples: (track_id, bbox, confidence)
         """
+        yolo_start = time.perf_counter()
         detector = self._get_detector()
         result = detector.track_people(frame)
+        yolo_time = (time.perf_counter() - yolo_start) * 1000
+        
+        # Log YOLO timing
+        if frame_number <= 5:  # First few frames
+            print(f"[FrameProcessor] YOLO PREDICTION #{frame_number}: {yolo_time:.2f}ms")
+        elif frame_number % 30 == 0:  # Every 30 frames
+            print(f"[FrameProcessor] YOLO PREDICTION #{frame_number}: {yolo_time:.2f}ms")
         
         detections = []
         
@@ -397,10 +406,12 @@ class FrameProcessor:
             if self.enable_color_analysis:
                 for item in selected_items:
                     bbox = item.relative_bbox.to_xyxy() if item.relative_bbox else None
+                    color_start = time.perf_counter()
                     item = self._analyze_item_color(item, person_crop, bbox)
+                    color_time = (time.perf_counter() - color_start) * 1000
                     # Log color analysis result
                     color_str = item.primary_color.color_name if item.primary_color else (item.color_groups[0] if item.color_groups else "Unknown")
-                    print(f"[FRAME_PROC] Color analysis for {item.class_name}: primary_color={color_str}, color_groups={item.color_groups}")
+                    print(f"[FRAME_PROC] Color analysis for {item.class_name}: {color_time:.2f}ms, primary_color={color_str}, color_groups={item.color_groups}")
 
             return selected_items
         

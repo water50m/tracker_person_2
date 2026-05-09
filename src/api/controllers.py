@@ -32,6 +32,14 @@ class DetectionController:
 
     def _map_to_schema(self, row) -> DetectionResponse:
         """ แปลงข้อมูลจาก DB Tuple -> Pydantic Model """
+        # Convert bbox from dict to list format if needed
+        bbox_data = row[9]
+        if bbox_data and isinstance(bbox_data, dict):
+            # Convert {'x': 314, 'y': 32, 'width': 39, 'height': 247} to [314, 32, 39, 247]
+            bbox = [bbox_data.get('x'), bbox_data.get('y'), bbox_data.get('width'), bbox_data.get('height')]
+        else:
+            bbox = bbox_data
+        
         return DetectionResponse(
             id=str(row[0]),          # UUID -> String
             track_id=int(row[1]),
@@ -44,22 +52,32 @@ class DetectionController:
             primary_detailed_color=str(row[7]) if row[7] else "unknown",
             primary_color_group="unknown",  # Removed - calculated on-the-fly
             clothes=row[8] if row[8] else [],
-            bbox=row[9] if row[9] else None,
+            bbox=bbox,
             camera_id=str(row[10]) if row[10] else "N/A",
             video_id=str(row[11]) if row[11] else None,
             video_time_offset=float(row[12]) if row[12] else None
         )
 
     def get_all(self, limit: int, offset: int) -> List[DetectionResponse]:
-        query = f"""SELECT {self._get_select_columns()} 
-                   FROM detections d 
-                   LEFT JOIN detection_items di ON d.id = di.detection_id
-                   LEFT JOIN detection_colors dc ON di.id = dc.detection_item_id
-                   ORDER BY d.timestamp DESC LIMIT %s OFFSET %s"""
-        with self.db.conn.cursor() as cur:
-            cur.execute(query, (limit, offset))
-            rows = cur.fetchall()
-            return [self._map_to_schema(r) for r in rows]
+        # Ensure database connection is available
+        self.db._ensure_connection()
+        if self.db.conn is None:
+            print("❌ Database connection not available")
+            return []
+        
+        try:
+            query = f"""SELECT {self._get_select_columns()} 
+                       FROM detections d 
+                       LEFT JOIN detection_items di ON d.id = di.detection_id
+                       LEFT JOIN detection_colors dc ON di.id = dc.detection_item_id
+                       ORDER BY d.timestamp DESC LIMIT %s OFFSET %s"""
+            with self.db.conn.cursor() as cur:
+                cur.execute(query, (limit, offset))
+                rows = cur.fetchall()
+                return [self._map_to_schema(r) for r in rows]
+        except Exception as e:
+            print(f"❌ Error fetching detections: {e}")
+            return []
 
     def search_persons(
         self,
