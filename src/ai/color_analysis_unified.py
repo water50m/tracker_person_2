@@ -58,125 +58,6 @@ def get_region_crop(person_crop: np.ndarray, clothing_type: str) -> Tuple[np.nda
         return region, "TOP"
 
 
-def analyze_person_colors(
-    person_crop: np.ndarray,
-    clothing_type: str,
-    embedder: Optional[ClothingEmbedder] = None
-) -> Dict[str, Any]:
-    """
-    Unified color analysis for a person crop.
-
-    This function is used by both:
-    - Main video processing pipeline
-    - Real-time streaming (stream-analyze, analyze-cv2)
-
-    Args:
-        person_crop: The cropped person image (numpy array)
-        clothing_type: Type of clothing (Dress, Jeans, Shirt, Jacket, etc.)
-        embedder: Optional ClothingEmbedder for Re-ID embedding extraction
-
-    Returns:
-        Dictionary containing standardized color data:
-        {
-            "category": str,  # "FULL", "TOP", "BOTTOM", "UNKNOWN"
-            "clothing_type": str,  # Original clothing type
-
-            # Detailed color analysis (63 colors) - PRIMARY DATA
-            "detailed_colors": Dict[str, float],  # {color_name: percentage}
-            "top_colors": List[Dict],  # [{"name": "red", "percentage": 45.5}, ...]
-            "primary_detailed_color": str,
-
-            # Secondary groups (calculated from detailed_colors)
-            "brightness_groups": Dict[str, float],
-            "vibrancy_groups": Dict[str, float],
-            "temperature_groups": Dict[str, float],
-            "clothing_color_groups": Dict[str, float],
-
-            # Re-ID data
-            "embedding": Optional[List[float]],
-            "clothes_list": List[str],
-        }
-    """
-    # Default return structure
-    default_result = {
-        "category": "UNKNOWN",
-        "clothing_type": clothing_type,
-        "detailed_colors": {},
-        "top_colors": [],
-        "primary_detailed_color": "unknown",
-        "brightness_groups": {},
-        "vibrancy_groups": {},
-        "temperature_groups": {},
-        "clothing_color_groups": {},
-        "embedding": None,
-        "clothes_list": [],
-    }
-
-    if person_crop is None or person_crop.size == 0:
-        return default_result
-
-    try:
-        print(f"[COLOR] Analyzing person with clothing type: {clothing_type}")
-
-        # Step 1: Get region crop based on clothing type
-        region_crop, category = get_region_crop(person_crop, clothing_type)
-
-        if region_crop is None or region_crop.size == 0:
-            print(f"[COLOR] Empty region crop, returning default")
-            return {**default_result, "clothing_type": clothing_type}
-
-        # Step 2: Analyze detailed colors (63-color system)
-        detailed_colors = analyze_detailed_colors(region_crop)
-
-        # Log dominant colors
-        dominant_colors = sorted(detailed_colors.items(), key=lambda x: x[1], reverse=True)[:3]
-        dominant_color_names = [f"{name}({pct:.1f}%)" for name, pct in dominant_colors]
-        print(f"[COLOR] Dominant colors: {dominant_color_names}")
-
-        # Step 3: Get primary detailed color
-        primary_detailed_color = get_primary_detailed_color(detailed_colors)
-
-        # Step 4: Get top 3 colors with tone group information
-        top_colors = get_top_colors(detailed_colors, n=3, include_group=True)
-
-        # Step 5: Categorize groups into 4 columns (excluding tone_groups)
-        categorized = get_color_categories(detailed_colors)
-
-        # Step 6: Extract Re-ID embedding if embedder available
-        embedding = None
-        clothes_list = []
-
-        if embedder is not None:
-            try:
-                emb, cloth_names = embedder.get_embedding(person_crop)
-                embedding = emb.tolist() if emb is not None else None
-                clothes_list = cloth_names if cloth_names else []
-            except Exception as e:
-                print(f"⚠️ Embedding extraction error: {e}")
-
-        # If no clothes from embedder, use clothing_type
-        if not clothes_list and clothing_type:
-            clothes_list = [clothing_type]
-
-        return {
-            "category": category,
-            "clothing_type": clothing_type,
-            "detailed_colors": detailed_colors,
-            "top_colors": top_colors,
-            "primary_detailed_color": primary_detailed_color,
-            "brightness_groups": categorized.get("brightness_groups", {}),
-            "vibrancy_groups": categorized.get("vibrancy_groups", {}),
-            "temperature_groups": categorized.get("temperature_groups", {}),
-            "clothing_color_groups": categorized.get("clothing_groups", {}),
-            "embedding": embedding,
-            "clothes_list": clothes_list,
-        }
-
-    except Exception as e:
-        print(f"❌ Unified color analysis error: {e}")
-        import traceback
-        traceback.print_exc()
-        return {**default_result, "clothing_type": clothing_type}
 
 
 def build_db_detection_data(
@@ -241,6 +122,91 @@ def build_db_detection_data(
         "embedding": color_results.get("embedding"),
         "clothes": color_results.get("clothes_list", [clothing_type]),
     }
+
+
+def analyze_clothing_colors(
+    clothing_crop: np.ndarray
+) -> Dict[str, Any]:
+    """
+    Analyze colors from a pre-cropped clothing image.
+    
+    PURE COLOR ANALYSIS - No embedding processing here.
+    Embedding should be handled in the detection pipeline separately.
+    
+    Args:
+        clothing_crop: The cropped clothing image (numpy array)
+        
+    Returns:
+        Dictionary containing color analysis data ONLY:
+        {
+            "category": "CLOTHING_CROP",
+            "clothing_type": "Unknown",
+            
+            # Detailed color analysis (63 colors)
+            "detailed_colors": Dict[str, float],
+            "top_colors": List[Dict],
+            "primary_detailed_color": str,
+            
+            # Secondary groups (calculated from detailed_colors)
+            "brightness_groups": Dict[str, float],
+            "vibrancy_groups": Dict[str, float],
+            "temperature_groups": Dict[str, float],
+            "clothing_color_groups": Dict[str, float],
+        }
+    """
+    # Default return structure
+    default_result = {
+        "category": "CLOTHING_CROP",
+        "clothing_type": "Unknown",
+        "detailed_colors": {},
+        "top_colors": [],
+        "primary_detailed_color": "unknown",
+        "brightness_groups": {},
+        "vibrancy_groups": {},
+        "temperature_groups": {},
+        "clothing_color_groups": {},
+    }
+
+    if clothing_crop is None or clothing_crop.size == 0:
+        return default_result
+
+    try:
+        print(f"[COLOR] Analyzing clothing crop directly")
+
+        # Step 1: Analyze detailed colors (63-color system) on the entire crop
+        detailed_colors = analyze_detailed_colors(clothing_crop)
+
+        # Log dominant colors
+        dominant_colors = sorted(detailed_colors.items(), key=lambda x: x[1], reverse=True)[:3]
+        dominant_color_names = [f"{name}({pct:.1f}%)" for name, pct in dominant_colors]
+        print(f"[COLOR] Dominant colors: {dominant_color_names}")
+
+        # Step 2: Get primary detailed color
+        primary_detailed_color = get_primary_detailed_color(detailed_colors)
+
+        # Step 3: Get top 3 colors with tone group information
+        top_colors = get_top_colors(detailed_colors, n=3, include_group=True)
+
+        # Step 4: Categorize groups into 4 columns (excluding tone_groups)
+        categorized = get_color_categories(detailed_colors)
+
+        return {
+            "category": "CLOTHING_CROP",
+            "clothing_type": "Unknown",
+            "detailed_colors": detailed_colors,
+            "top_colors": top_colors,
+            "primary_detailed_color": primary_detailed_color,
+            "brightness_groups": categorized.get("brightness_groups", {}),
+            "vibrancy_groups": categorized.get("vibrancy_groups", {}),
+            "temperature_groups": categorized.get("temperature_groups", {}),
+            "clothing_color_groups": categorized.get("clothing_groups", {}),
+        }
+
+    except Exception as e:
+        print(f"❌ Clothing color analysis error: {e}")
+        import traceback
+        traceback.print_exc()
+        return default_result
 
 
 # Convenience function for quick color analysis without full setup
