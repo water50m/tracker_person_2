@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Stream Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #video { border: 2px solid #333; max-width: 800px; }
+        #status { margin: 10px 0; padding: 10px; background: #f0f0f0; }
+        .connected { background: #d4edda; color: #155724; }
+        .disconnected { background: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <h1>🔌 WebSocket Stream Test</h1>
+    <div id="status" class="disconnected">Status: Disconnected</div>
+    <img id="video" alt="Video Stream">
+    
+    <script>
+        const ws = new WebSocket('ws://localhost:8001/ws/11');
+        const video = document.getElementById('video');
+        const status = document.getElementById('status');
+        
+        ws.onopen = function() {
+            status.textContent = 'Status: Connected';
+            status.className = 'connected';
+            console.log('✅ WebSocket connected');
+        };
+        
+        ws.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            if (data.type === 'frame') {
+                video.src = 'data:image/jpeg;base64,' + data.frame;
+                console.log(`📹 Frame #${data.frame_count} | Size: ${data.frame.length} chars`);
+            }
+        };
+        
+        ws.onclose = function() {
+            status.textContent = 'Status: Disconnected';
+            status.className = 'disconnected';
+            console.log('❌ WebSocket disconnected');
+        };
+        
+        ws.onerror = function(error) {
+            console.error('WebSocket error:', error);
+            status.textContent = 'Status: Error';
+            status.className = 'disconnected';
+        };
+    </script>
+</body>
+</html>

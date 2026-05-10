@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from typing import List
 from fastapi import FastAPI, HTTPException, Query
 from fastapi import UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 from src.api.schemas import (
     DetectionResponse, SearchCriteria, PersonTimeline,
     DailyStats, ClothingStats, AdvancedSearchRequest
@@ -275,3 +276,54 @@ async def search_advanced(
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/video")
+async def video_stream():
+    """
+    Simple MJPEG video stream endpoint for camera 11 (YouTube stream).
+    Access via: http://[ip]:8002/video
+    """
+    from src.services.stream_manager import stream_manager
+    from src.api.video_controller import _ACTIVE_STREAMS
+    import asyncio
+    import time
+    
+    camera_id = "11"
+    
+    async def generate_mjpeg():
+        """Generate MJPEG stream from stream manager"""
+        while camera_id in _ACTIVE_STREAMS:
+            frame_bytes = stream_manager.get_frame(camera_id)
+            if frame_bytes:
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + frame_bytes
+                    + b"\r\n"
+                )
+            else:
+                # No frame available, wait briefly
+                await asyncio.sleep(0.033)  # ~30fps
+                continue
+            
+            await asyncio.sleep(0.033)  # ~30fps
+        
+        # Stream ended
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: text/plain\r\n\r\n"
+            b"Stream ended"
+            + b"\r\n"
+        )
+    
+    return StreamingResponse(
+        generate_mjpeg(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Connection": "close",
+        }
+    )

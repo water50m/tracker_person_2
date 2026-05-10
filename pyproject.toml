@@ -27,6 +27,10 @@ dependencies = [
     "olefile>=0.47",
     "moviepy>=2.2.1",
     "ffmpeg>=1.4",
+    "pafy>=0.5.5",
+    "youtube-dl>=2021.12.17",
+    "websockets>=16.0",
+    "pillow>=11.3.0",
 ]
 
 [[tool.uv.index]]
