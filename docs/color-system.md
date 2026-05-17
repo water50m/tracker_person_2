@@ -55,7 +55,7 @@
 | mint | 70-85 | 30-100 | 180-255 | มิ้นต์ |
 | teal | 75-95 | 100-255 | 80-180 | ฟ้าเขียว |
 
-### 5. โทนสีน้ำเงิน (Blue) - 9 สี
+### 5. โทนสีน้ำเงิน (Blue) - 8 สี
 | สี | ช่วง H | ช่วง S | ช่วง V | คำอธิบาย |
 |---|---|---|---|---|
 | blue | 85-135 | 50-255 | 50-255 | น้ำเงินมาตรฐาน |
@@ -89,7 +89,7 @@
 | beige | 20-40 | 20-60 | 180-255 | เบจ |
 | camel | 20-35 | 40-100 | 100-180 | คาเมล |
 
-### 8. โทนสีชมพู (Pink) - 6 สี
+### 8. โทนสีชมพู (Pink) - 5 สี
 | สี | ช่วง H | ช่วง S | ช่วง V | คำอธิบาย |
 |---|---|---|---|---|
 | pink | 160-180 | 50-255 | 150-255 | ชมพูมาตรฐาน |
@@ -98,7 +98,7 @@
 | rose | 165-180 | 100-200 | 120-200 | กุหลาบ |
 | salmon | 0-15 | 100-200 | 150-255 | แซลมอน |
 
-### 9. โทนสีเทา/ขาว/ดำ (Grayscale) - 7 สี
+### 9. โทนสีเทา/ขาว/ดำ (Grayscale) - 6 สี
 | สี | ช่วง H | ช่วง S | ช่วง V | คำอธิบาย |
 |---|---|---|---|---|
 | black | 0-180 | 0-50 | 0-40 | ดำ |
@@ -114,18 +114,20 @@
 
 กลุ่มสีใช้สำหรับการค้นหาที่กว้างขึ้น โดยรวมสีละเอียดหลายสีเข้าด้วยกัน
 
-### 1. กลุ่มตามโทนสีหลัก (8 กลุ่ม)
+### 1. กลุ่มตามโทนสีหลัก (10 กลุ่ม)
 
 | กลุ่ม | สีที่รวม | จำนวน |
 |---|---|---|
-| **red_tones** | red, dark_red, crimson, scarlet, maroon, pink, hot_pink, rose, salmon | 9 |
-| **orange_tones** | orange, dark_orange, amber, peach, coral, gold, mustard, khaki | 8 |
-| **yellow_tones** | yellow, gold, light_yellow, mustard, khaki, beige, tan, camel | 8 |
+| **red_tones** | red, dark_red, crimson, scarlet, maroon | 5 |
+| **orange_tones** | orange, dark_orange, amber, peach, coral | 5 |
+| **yellow_tones** | yellow, gold, light_yellow, mustard, khaki | 5 |
 | **green_tones** | green, dark_green, light_green, olive, lime, forest_green, mint, teal | 8 |
 | **blue_tones** | blue, dark_blue, light_blue, navy, sky_blue, royal_blue, cobalt, turquoise | 8 |
 | **purple_tones** | purple, dark_purple, light_purple, violet, lavender, magenta, fuchsia, plum | 8 |
-| **brown_tones** | brown, dark_brown, light_brown, tan, beige, camel, olive, khaki | 8 |
-| **pink_tones** | pink, light_pink, hot_pink, rose, salmon, lavender, fuchsia | 7 |
+| **brown_tones** | brown, dark_brown, light_brown, tan, beige, camel | 6 |
+| **pink_tones** | pink, light_pink, hot_pink, rose, salmon | 5 |
+| **white_tones** | white, light_gray, silver, beige | 4 |
+| **black_tones** | black, dark_gray | 2 |
 
 ### 2. กลุ่มตามความสว่าง (3 กลุ่ม)
 
@@ -430,7 +432,7 @@ Migration นี้จะ:
 |---|---|
 | สีละเอียด | 63 สี |
 | กลุ่มสี | 22 กลุ่ม |
-| กลุ่มตามโทนสีหลัก | 8 กลุ่ม |
+| กลุ่มตามโทนสีหลัก | 10 กลุ่ม |
 | กลุ่มตามความสว่าง | 3 กลุ่ม |
 | กลุ่มตามความสดใส | 3 กลุ่ม |
 | กลุ่มตามอุณหภูมิสี | 3 กลุ่ม |

@@ -1,0 +1,178 @@
+{
+  "generated_at": "2026-05-13T13:26:14+0700",
+  "purpose": "Fresh deterministic tests for Chapter 4 flow design and data contracts",
+  "tests": {
+    "frame_processor_two_pass_contract": {
+      "status": "success",
+      "persons": 1,
+      "items_per_person": 2,
+      "embedding_dimension": 768,
+      "selected_classes": [
+        "long_sleeve",
+        "trousers"
+      ],
+      "selected_color_groups": [
+        "blue_tones",
+        "dark_colors"
+      ]
+    },
+    "video_processor_metrics": {
+      "source": "synthetic 24-frame video",
+      "frame_skip": 4,
+      "processed_frame_numbers": [
+        0,
+        4,
+        8,
+        12,
+        16,
+        20
+      ],
+      "stats": {
+        "video_id": "chapter4-video-flow",
+        "camera_id": "CH4-CAM-01",
+        "total_frames": 24,
+        "processed_frames": 6,
+        "skipped_frames": 18,
+        "fps": 12.0,
+        "image_width": 160,
+        "image_height": 120,
+        "total_detections": 6,
+        "num_persons_detected": 6,
+        "num_detections_saved": 0,
+        "unique_persons": 2,
+        "status": "success",
+        "error_message": null,
+        "completed": true,
+        "duration_seconds": 0.01823980000335723,
+        "effective_fps": 328.9509752790949,
+        "processing_time_ms": 18.234500006656162,
+        "num_errors": 0
+      },
+      "progress_events": [
+        [
+          16,
+          4,
+          24
+        ],
+        [
+          33,
+          8,
+          24
+        ],
+        [
+          50,
+          12,
+          24
+        ],
+        [
+          66,
+          16,
+          24
+        ],
+        [
+          83,
+          20,
+          24
+        ]
+      ],
+      "detections_seen": [
+        [
+          0,
+          1,
+          "long_sleeve"
+        ],
+        [
+          4,
+          1,
+          "long_sleeve"
+        ],
+        [
+          8,
+          1,
+          "long_sleeve"
+        ],
+        [
+          12,
+          2,
+          "long_sleeve"
+        ],
+        [
+          16,
+          2,
+          "long_sleeve"
+        ],
+        [
+          20,
+          2,
+          "long_sleeve"
+        ]
+      ]
+    },
+    "database_payload_contract": {
+      "payload_keys": [
+        "bbox",
+        "camera_id",
+        "category",
+        "class_name",
+        "embedding",
+        "image_path",
+        "track_id",
+        "video_id",
+        "video_time_offset"
+      ],
+      "embedding_dimension": 768,
+      "saved_count": 1
+    },
+    "advanced_search_query_contract": {
+      "where_contains": [
+        "camera_id",
+        "video_id",
+        "clothing class filter",
+        "jsonb top_colors filter"
+      ],
+      "param_count": 9,
+      "threshold_percent": 25.0
+    }
+  },
+  "chapter4_outline": [
+    {
+      "section": "4.1 ผลการทำงานของระบบ",
+      "data_source": "video_processor_metrics",
+      "metrics": [
+        "total_frames",
+        "processed_frames",
+        "total_detections",
+        "unique_persons",
+        "effective_fps"
+      ]
+    },
+    {
+      "section": "4.2 ผลการตรวจจับและจำแนกคุณลักษณะ",
+      "data_source": "frame_processor_two_pass_contract",
+      "metrics": [
+        "persons",
+        "items_per_person",
+        "selected_classes",
+        "selected_color_groups",
+        "embedding_dimension"
+      ]
+    },
+    {
+      "section": "4.3 ผลการบันทึกข้อมูล",
+      "data_source": "database_payload_contract",
+      "metrics": [
+        "payload_keys",
+        "saved_count",
+        "embedding_dimension"
+      ]
+    },
+    {
+      "section": "4.4 ผลการค้นหา",
+      "data_source": "advanced_search_query_contract",
+      "metrics": [
+        "param_count",
+        "threshold_percent"
+      ]
+    }
+  ]
+}

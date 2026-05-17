@@ -520,6 +520,7 @@ class VideoProcessor:
             video_id=video_id,
             camera_id=camera_id,
             status=ProcessingStatus.PROCESSING,
+            start_time=start_time,
         )
         
         # Create initial resume state
@@ -599,6 +600,7 @@ class VideoProcessor:
             # Process frames
             frame_number = start_frame
             processed_count = 0
+            seen_person_ids = set()
             
             # Track last processed frame for reader thread mode
             last_processed_frame = start_frame - effective_frame_skip
@@ -639,7 +641,6 @@ class VideoProcessor:
                     if (frame_number - start_frame) % effective_frame_skip != 0:
                         frame_number += 1
                         continue
-                    frame_number += 1
                 
                 # Process frame with stop event checking
                 try:
@@ -657,6 +658,7 @@ class VideoProcessor:
                     
                     # Handle detections
                     if result.detections:
+                        self._stats.total_detections += len(result.detections)
                         for idx, person in enumerate(result.detections):
                             # Check stop event periodically during detection handling
                             if stop_event and stop_event.is_set():
@@ -665,6 +667,7 @@ class VideoProcessor:
                                 break
                             # Update stats
                             self._stats.num_persons_detected += 1
+                            seen_person_ids.add(person.persistent_id if person.persistent_id is not None else person.track_id)
                             
                             # Apply hybrid tracking if enabled
                             person_crop = None
@@ -777,6 +780,9 @@ class VideoProcessor:
             self._stats.processed_frames = processed_count
             self._stats.skipped_frames = frame_number - start_frame - processed_count
             self._stats.processing_time_ms = (time.perf_counter() - start_time) * 1000
+            self._stats.end_time = time.perf_counter()
+            self._stats.unique_persons = len(seen_person_ids)
+            self._stats.completed = self._stats.status != ProcessingStatus.STOPPED
             
             if self._stats.status != ProcessingStatus.STOPPED:
                 self._stats.status = ProcessingStatus.SUCCESS if self._stats.num_errors == 0 else ProcessingStatus.PARTIAL
