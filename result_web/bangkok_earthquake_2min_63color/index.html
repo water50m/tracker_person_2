@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <title>Video Clothing + Person Prediction Viewer</title>
+  <style>
+    :root { font-family: Arial, sans-serif; color-scheme: light; }
+    body { margin: 0; background: #f3f5f7; color: #101820; }
+    header { padding: 12px 16px; background: #fff; border-bottom: 1px solid #d9dee5; }
+    h1 { margin: 0; font-size: 18px; }
+    .stage { position: relative; background: #111; width: 100%; max-height: 76vh; overflow: auto; text-align: center; }
+    #videoWrap { position: relative; display: inline-block; line-height: 0; }
+    video { max-width: 100vw; max-height: 76vh; display: block; }
+    canvas { position: absolute; left: 0; top: 0; pointer-events: none; }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; padding: 12px 16px; background: #fff; border-top: 1px solid #d9dee5; }
+    button, select { border: 1px solid #b7c0ca; background: #fff; border-radius: 6px; padding: 7px 10px; }
+    button:hover { background: #edf2f7; }
+    label { font-size: 13px; white-space: nowrap; }
+    .filters { padding: 0 16px 12px; display: flex; flex-wrap: wrap; gap: 10px; background: #fff; }
+    .status { margin-left: auto; font-size: 13px; color: #506070; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Video Clothing + Person Prediction Viewer</h1>
+</header>
+<section class="stage">
+  <div id="videoWrap">
+    <video id="video" src="bangkok_earthquake_first_2min.mp4" controls></video>
+    <canvas id="overlay"></canvas>
+  </div>
+</section>
+<section class="controls">
+  <button id="playPauseBtn">Play/Pause</button>
+  <button id="stopBtn">Stop</button>
+  <label>Clip
+    <select id="clipSelect">
+      <option value="first" selected>2 นาทีแรก</option>
+      <option value="frameClip">Frame 1000-1999</option>
+    </select>
+  </label>
+  <label>Box mode
+    <select id="boxMode">
+      <option value="person" selected>คน</option>
+      <option value="clothing">เสื้อผ้า</option>
+      <option value="both">ทั้งคู่</option>
+    </select>
+  </label>
+  <label><input id="showLabels" type="checkbox" checked> แสดงชื่อ class + id</label>
+  <label><input id="showDots" type="checkbox" checked> แสดงจุดสีด้านล่าง bbox</label>
+  <label><input id="showRawClothing" type="checkbox"> แสดง clothing raw boxes</label>
+  <span class="status" id="status"></span>
+</section>
+<section class="filters">
+  <strong>Filter class:</strong>
+  <label><input type="checkbox" class="classFilter" value="short_sleeve" checked> short_sleeve</label>
+<label><input type="checkbox" class="classFilter" value="long_sleeve" checked> long_sleeve</label>
+<label><input type="checkbox" class="classFilter" value="shorts" checked> shorts</label>
+<label><input type="checkbox" class="classFilter" value="trousers" checked> trousers</label>
+<label><input type="checkbox" class="classFilter" value="skirt" checked> skirt</label>
+<label><input type="checkbox" class="classFilter" value="dress" checked> dress</label>
+</section>
+<script src="prediction_data.js"></script>
+<script>
+const data = window.PREDICTION_DATA || { metadata: {}, frames: [] };
+const video = document.getElementById('video');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const frameByIndex = new Map(data.frames.map(row => [row.frame, row]));
+const frameNumbers = data.frames.map(row => row.frame).sort((a, b) => a - b);
+const colors = data.metadata.class_colors || {};
+const classOrder = data.metadata.class_display_order || ["short_sleeve", "long_sleeve", "dress", "shorts", "trousers", "skirt"];
+const clips = {
+  first: { url: "bangkok_earthquake_first_2min.mp4", startFrame: 0 },
+  frameClip: { url: "bangkok_earthquake_frames_1000_1999.mp4", startFrame: 1000 }
+};
+
+function activeClasses() {
+  return new Set([...document.querySelectorAll('.classFilter:checked')].map(el => el.value));
+}
+function orderedClassNames(classes) {
+  const set = new Set(classes || []);
+  const ordered = classOrder.filter(name => set.has(name));
+  for (const name of set) {
+    if (!ordered.includes(name)) ordered.push(name);
+  }
+  return ordered;
+}
+function resizeCanvas() {
+  const rect = video.getBoundingClientRect();
+  canvas.width = Math.round(rect.width);
+  canvas.height = Math.round(rect.height);
+}
+function scaledBox(bbox) {
+  const sx = canvas.width / (data.metadata.width || video.videoWidth || canvas.width);
+  const sy = canvas.height / (data.metadata.height || video.videoHeight || canvas.height);
+  return [bbox[0] * sx, bbox[1] * sy, bbox[2] * sx, bbox[3] * sy];
+}
+function drawLabel(text, x, y, color) {
+  if (!document.getElementById('showLabels').checked) return;
+  ctx.font = '13px Arial';
+  const w = ctx.measureText(text).width + 10;
+  const yy = Math.max(0, y - 20);
+  ctx.fillStyle = color;
+  ctx.fillRect(x, yy, w, 20);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(text, x + 5, yy + 14);
+}
+const analyzedColorHex = {
+  black: '#111827',
+  white: '#f8fafc',
+  gray: '#94a3b8',
+  dark_gray: '#4b5563',
+  light_gray: '#cbd5e1',
+  silver: '#c0c0c0',
+  red: '#dc2626',
+  dark_red: '#7f1d1d',
+  crimson: '#b91c1c',
+  scarlet: '#ef4444',
+  maroon: '#7f1d1d',
+  burgundy: '#800020',
+  orange: '#f97316',
+  dark_orange: '#c2410c',
+  amber: '#f59e0b',
+  peach: '#ffc4a3',
+  coral: '#fb7185',
+  yellow: '#eab308',
+  gold: '#d4af37',
+  light_yellow: '#fef08a',
+  mustard: '#ca8a04',
+  khaki: '#bdb76b',
+  green: '#16a34a',
+  dark_green: '#166534',
+  light_green: '#86efac',
+  olive: '#808000',
+  lime: '#84cc16',
+  forest_green: '#14532d',
+  mint: '#98ff98',
+  teal: '#0f766e',
+  cyan: '#06b6d4',
+  aqua: '#00ffff',
+  blue: '#2563eb',
+  dark_blue: '#1e3a8a',
+  light_blue: '#93c5fd',
+  navy: '#172554',
+  sky_blue: '#38bdf8',
+  royal_blue: '#1d4ed8',
+  cobalt: '#0047ab',
+  turquoise: '#40e0d0',
+  indigo: '#4f46e5',
+  denim: '#1560bd',
+  purple: '#9333ea',
+  dark_purple: '#581c87',
+  light_purple: '#c084fc',
+  violet: '#7c3aed',
+  lavender: '#c4b5fd',
+  magenta: '#d946ef',
+  fuchsia: '#c026d3',
+  plum: '#673147',
+  brown: '#92400e',
+  dark_brown: '#451a03',
+  light_brown: '#a16207',
+  tan: '#d2b48c',
+  beige: '#e7d8b8',
+  camel: '#c19a6b',
+  cream: '#fffdd0',
+  pink: '#ec4899',
+  light_pink: '#f9a8d4',
+  hot_pink: '#ff1493',
+  rose: '#f43f5e',
+  salmon: '#fa8072',
+  charcoal: '#36454f'
+};
+function dominantAnalyzedColor(det) {
+  const primaryDetailed = det && det.primary_detailed_color;
+  if (primaryDetailed && analyzedColorHex[primaryDetailed]) return analyzedColorHex[primaryDetailed];
+  const colorMap = (det && (det.detailed_colors || det.reid_colors)) || {};
+  let bestName = null;
+  let bestValue = -1;
+  for (const [name, value] of Object.entries(colorMap)) {
+    if (Number(value) > bestValue) {
+      bestName = name;
+      bestValue = Number(value);
+    }
+  }
+  return bestName && analyzedColorHex[bestName] ? analyzedColorHex[bestName] : null;
+}
+function clothingSlot(className) {
+  if (className === 'short_sleeve' || className === 'long_sleeve') return 'top';
+  if (className === 'shorts' || className === 'trousers' || className === 'skirt') return 'bottom';
+  if (className === 'dress') return 'dress';
+  return null;
+}
+function personDotColors(person) {
+  const slotItems = {};
+  for (const det of person.result_clothing || person.clothing || []) {
+    const slot = clothingSlot(det.class);
+    if (!slot) continue;
+    if (!slotItems[slot] || Number(det.confidence || 0) > Number(slotItems[slot].confidence || 0)) {
+      slotItems[slot] = det;
+    }
+  }
+  const dots = [];
+  for (const slot of ['top', 'dress', 'bottom']) {
+    const color = dominantAnalyzedColor(slotItems[slot]);
+    if (color) dots.push(color);
+  }
+  return dots.length ? dots : [person.color || '#00a6fb'];
+}
+function drawDots(x1, y1, x2, y2, dotColors) {
+  if (!document.getElementById('showDots').checked) return;
+  const dots = (dotColors || []).filter(Boolean);
+  if (!dots.length) return;
+  const spacing = 13;
+  const startX = (x1 + x2) / 2 - ((dots.length - 1) * spacing) / 2;
+  dots.forEach((color, index) => {
+    ctx.beginPath();
+    ctx.arc(startX + index * spacing, y2, 5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  });
+}
+function drawBox(bbox, color, label, dashed = false, dotColors = null) {
+  if (!bbox) return;
+  const [x1, y1, x2, y2] = scaledBox(bbox);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3;
+  ctx.setLineDash(dashed ? [7, 5] : []);
+  ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  ctx.setLineDash([]);
+  drawLabel(label, x1, y1, color);
+  drawDots(x1, y1, x2, y2, dotColors || [color]);
+}
+function currentFrameData() {
+  const fps = data.metadata.fps || 30;
+  const clip = clips[document.getElementById('clipSelect').value] || clips.first;
+  const frame = clip.startFrame + Math.round(video.currentTime * fps);
+  if (frameByIndex.has(frame)) return frameByIndex.get(frame);
+  let lo = 0, hi = frameNumbers.length - 1, best = frameNumbers[0];
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (frameNumbers[mid] <= frame) {
+      best = frameNumbers[mid];
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return frameByIndex.get(best) || { frame, persons: [] };
+}
+function draw() {
+  if (!video.videoWidth) return requestAnimationFrame(draw);
+  resizeCanvas();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const row = currentFrameData();
+  const mode = document.getElementById('boxMode').value;
+  const filters = activeClasses();
+  const showRaw = document.getElementById('showRawClothing').checked;
+  for (const person of row.persons || []) {
+    const resultClothing = person.result_clothing || person.clothing || [];
+    if (!showRaw && resultClothing.length === 0) continue;
+    if (showRaw && resultClothing.length === 0 && !(person.raw_clothing || []).length) continue;
+    const finalClasses = (person.final_outfit && person.final_outfit.classes) || [];
+    const resultClasses = finalClasses.length ? finalClasses : resultClothing.map(det => det.class);
+    const keptClasses = orderedClassNames(resultClasses).filter(name => filters.has(name));
+    const finalLabel = person.final_outfit && person.final_outfit.label;
+    const personLabelText = finalLabel || keptClasses.join(', ');
+    const personLabel = `ID ${person.id}${personLabelText ? ': ' + personLabelText : ''}`;
+    if (mode === 'person' || mode === 'both') {
+      drawBox(person.bbox, person.color || '#00a6fb', personLabel, false, personDotColors(person));
+    }
+    if (mode === 'clothing' || mode === 'both') {
+      const clothing = showRaw ? (person.raw_clothing || []) : resultClothing;
+      for (const det of clothing) {
+        if (!filters.has(det.class)) continue;
+        const color = colors[det.class] || '#ffffff';
+        const sourceLabel = showRaw ? 'RAW ' : '';
+        const label = `${sourceLabel}ID ${person.id} ${det.class} ${Number(det.confidence || 0).toFixed(2)}`;
+        drawBox(det.bbox, color, label, !det.kept, [dominantAnalyzedColor(det) || color]);
+      }
+    }
+  }
+  document.getElementById('status').textContent = `time ${video.currentTime.toFixed(2)}s | frame ${row.frame} | persons ${(row.persons || []).length}`;
+  requestAnimationFrame(draw);
+}
+document.getElementById('playPauseBtn').onclick = () => video.paused ? video.play() : video.pause();
+document.getElementById('stopBtn').onclick = () => { video.pause(); video.currentTime = 0; draw(); };
+document.getElementById('clipSelect').onchange = (event) => {
+  const clip = clips[event.target.value] || clips.first;
+  video.pause();
+  video.src = clip.url;
+  video.currentTime = 0;
+  video.load();
+  draw();
+};
+document.querySelectorAll('input, select').forEach(el => el.addEventListener('change', draw));
+window.addEventListener('resize', draw);
+video.addEventListener('loadedmetadata', draw);
+draw();
+</script>
+</body>
+</html>
+

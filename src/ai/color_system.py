@@ -49,6 +49,11 @@ DETAILED_COLOR_RANGES = {
         "s_range": (100, 200),
         "v_range": (30, 90)
     },
+    "burgundy": {
+        "h_range": (170, 180),
+        "s_range": (80, 220),
+        "v_range": (25, 120)
+    },
     
     # 🟠 Orange shades
     "orange": {
@@ -145,6 +150,16 @@ DETAILED_COLOR_RANGES = {
         "s_range": (100, 255),
         "v_range": (80, 180)
     },
+    "cyan": {
+        "h_range": (85, 100),
+        "s_range": (120, 255),
+        "v_range": (120, 255)
+    },
+    "aqua": {
+        "h_range": (80, 95),
+        "s_range": (80, 220),
+        "v_range": (170, 255)
+    },
     
     # 🔵 Blue shades
     "blue": {
@@ -186,6 +201,16 @@ DETAILED_COLOR_RANGES = {
         "h_range": (80, 100),
         "s_range": (100, 200),
         "v_range": (150, 255)
+    },
+    "indigo": {
+        "h_range": (115, 140),
+        "s_range": (80, 255),
+        "v_range": (40, 140)
+    },
+    "denim": {
+        "h_range": (95, 125),
+        "s_range": (40, 180),
+        "v_range": (60, 170)
     },
     
     # 🟣 Purple shades
@@ -320,6 +345,16 @@ DETAILED_COLOR_RANGES = {
         "s_range": (0, 20),
         "v_range": (180, 230)
     },
+    "charcoal": {
+        "h_range": (0, 180),
+        "s_range": (0, 35),
+        "v_range": (20, 70)
+    },
+    "cream": {
+        "h_range": (20, 45),
+        "s_range": (5, 55),
+        "v_range": (215, 255)
+    },
 }
 
 # ============================================
@@ -328,52 +363,52 @@ DETAILED_COLOR_RANGES = {
 
 COLOR_GROUPS = {
     # กลุ่มตามโทนหลัก (10 กลุ่ม - เพิ่ม white_tones, black_tones)
-    "red_tones": ["red", "dark_red", "crimson", "scarlet", "maroon"],
+    "red_tones": ["red", "dark_red", "crimson", "scarlet", "maroon", "burgundy"],
     "orange_tones": ["orange", "dark_orange", "amber", "peach", "coral"],
     "yellow_tones": ["yellow", "gold", "light_yellow", "mustard", "khaki"],
     "green_tones": ["green", "dark_green", "light_green", "olive", "lime", "forest_green", "mint", "teal"],
-    "blue_tones": ["blue", "dark_blue", "light_blue", "navy", "sky_blue", "royal_blue", "cobalt", "turquoise"],
+    "blue_tones": ["blue", "dark_blue", "light_blue", "navy", "sky_blue", "royal_blue", "cobalt", "turquoise", "cyan", "aqua", "indigo", "denim"],
     "purple_tones": ["purple", "dark_purple", "light_purple", "violet", "lavender", "magenta", "fuchsia", "plum"],
     "brown_tones": ["brown", "dark_brown", "light_brown", "tan", "beige", "camel"],
     "pink_tones": ["pink", "light_pink", "hot_pink", "rose", "salmon"],
-    "white_tones": ["white", "light_gray", "silver", "beige"],
-    "black_tones": ["black", "dark_gray"],
+    "white_tones": ["white", "light_gray", "silver", "beige", "cream"],
+    "black_tones": ["black", "dark_gray", "charcoal"],
     
     # กลุ่มตามความสว่าง
-    "light_colors": ["white", "light_gray", "silver", "light_yellow", "light_green", "light_blue", 
-                      "light_purple", "light_pink", "sky_blue", "mint", "peach", "beige"],
-    "dark_colors": ["black", "dark_gray", "dark_red", "dark_orange", "dark_green", "dark_blue", 
-                    "dark_purple", "dark_brown", "navy", "maroon", "forest_green"],
+    "light_colors": ["white", "light_gray", "silver", "light_yellow", "light_green", "light_blue",
+                      "light_purple", "light_pink", "sky_blue", "mint", "peach", "beige", "cream", "aqua"],
+    "dark_colors": ["black", "dark_gray", "charcoal", "dark_red", "dark_orange", "dark_green", "dark_blue",
+                    "dark_purple", "dark_brown", "navy", "maroon", "burgundy", "forest_green", "indigo", "denim"],
     "medium_colors": ["gray", "red", "orange", "yellow", "green", "blue", "purple", "brown", 
-                      "pink", "tan", "camel", "olive", "teal", "turquoise", "violet", "plum"],
+                      "pink", "tan", "camel", "olive", "teal", "turquoise", "cyan", "violet", "plum"],
     
     # กลุ่มตามความสดใส
     "vibrant_colors": ["red", "orange", "yellow", "green", "blue", "purple", "pink", 
                        "crimson", "scarlet", "amber", "lime", "sky_blue", "royal_blue", 
-                       "cobalt", "violet", "magenta", "fuchsia", "hot_pink", "turquoise"],
+                       "cobalt", "violet", "magenta", "fuchsia", "hot_pink", "turquoise", "cyan", "aqua"],
     "muted_colors": ["gray", "dark_gray", "light_gray", "silver", "olive", "khaki", 
-                     "tan", "beige", "camel", "maroon", "navy", "forest_green", "plum"],
+                     "tan", "beige", "cream", "camel", "maroon", "burgundy", "navy", "denim", "charcoal", "forest_green", "plum"],
     "pastel_colors": ["light_yellow", "light_green", "light_blue", "light_purple", 
-                      "light_pink", "mint", "lavender", "peach", "beige"],
+                      "light_pink", "mint", "lavender", "peach", "beige", "cream", "aqua"],
     
     # กลุ่มตามอุณหภูมิสี
     "warm_colors": ["red", "orange", "yellow", "pink", "crimson", "scarlet", "amber", 
                     "gold", "peach", "coral", "mustard", "khaki", "brown", "tan", 
-                    "beige", "camel", "rose", "salmon", "hot_pink"],
-    "cool_colors": ["green", "blue", "purple", "cyan", "teal", "turquoise", "sky_blue", 
+                    "beige", "cream", "camel", "rose", "salmon", "hot_pink", "burgundy"],
+    "cool_colors": ["green", "blue", "purple", "cyan", "aqua", "teal", "turquoise", "sky_blue",
                     "royal_blue", "cobalt", "violet", "lavender", "magenta", "fuchsia", 
-                    "plum", "mint", "navy", "forest_green"],
-    "neutral_colors": ["black", "white", "gray", "dark_gray", "light_gray", "silver", 
-                      "beige", "tan", "camel", "khaki"],
+                    "plum", "mint", "navy", "indigo", "denim", "forest_green"],
+    "neutral_colors": ["black", "white", "gray", "dark_gray", "light_gray", "silver",
+                      "charcoal", "beige", "cream", "tan", "camel", "khaki"],
     
     # กลุ่มสำหรับเสื้อผ้าที่พบบ่อย
     "common_shirt_colors": ["white", "black", "blue", "gray", "red", "navy", "light_blue", 
-                           "pink", "purple", "green", "yellow", "orange", "brown", "beige"],
-    "common_pants_colors": ["black", "blue", "gray", "dark_blue", "navy", "brown", "khaki", 
-                           "dark_gray", "white", "beige"],
-    "formal_colors": ["black", "white", "gray", "dark_gray", "navy", "dark_blue", "brown"],
+                           "pink", "purple", "green", "yellow", "orange", "brown", "beige", "cream", "cyan", "denim"],
+    "common_pants_colors": ["black", "blue", "gray", "dark_blue", "navy", "denim", "brown", "khaki",
+                           "dark_gray", "charcoal", "white", "beige"],
+    "formal_colors": ["black", "white", "gray", "dark_gray", "charcoal", "navy", "dark_blue", "brown"],
     "casual_colors": ["blue", "green", "red", "yellow", "orange", "pink", "purple", "teal", 
-                     "turquoise", "coral", "mint", "lavender"],
+                     "turquoise", "cyan", "aqua", "denim", "coral", "mint", "lavender"],
 }
 
 # ============================================
@@ -388,6 +423,7 @@ COLOR_TO_TONE_GROUPS = {
     "crimson": ["red_tones"],
     "scarlet": ["red_tones"],
     "maroon": ["red_tones"],
+    "burgundy": ["red_tones"],
     
     # Orange tones
     "orange": ["orange_tones"],
@@ -412,6 +448,8 @@ COLOR_TO_TONE_GROUPS = {
     "forest_green": ["green_tones"],
     "mint": ["green_tones"],
     "teal": ["green_tones"],
+    "cyan": ["blue_tones", "green_tones"],
+    "aqua": ["blue_tones", "green_tones"],
     
     # Blue tones
     "blue": ["blue_tones"],
@@ -422,6 +460,8 @@ COLOR_TO_TONE_GROUPS = {
     "royal_blue": ["blue_tones"],
     "cobalt": ["blue_tones"],
     "turquoise": ["blue_tones"],
+    "indigo": ["blue_tones", "purple_tones"],
+    "denim": ["blue_tones"],
     
     # Purple tones
     "purple": ["purple_tones"],
@@ -452,10 +492,12 @@ COLOR_TO_TONE_GROUPS = {
     "white": ["white_tones"],
     "light_gray": ["white_tones", "black_tones"],  # Ambiguous
     "silver": ["white_tones"],
+    "cream": ["white_tones", "yellow_tones"],
     
     # Black tones
     "black": ["black_tones"],
     "dark_gray": ["black_tones"],
+    "charcoal": ["black_tones"],
     
     # Gray (not in any tone group - neutral)
     "gray": [],

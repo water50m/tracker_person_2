@@ -1,0 +1,468 @@
+{
+  "enabled": true,
+  "color_threshold": 0.7,
+  "confirmation_frames": 30,
+  "min_hits": 10,
+  "max_gap_frames": 45,
+  "aggregate_slot_history": 10,
+  "recovered_tracks": 9,
+  "remapped_person_rows": 2616,
+  "events": [
+    {
+      "new_id": 4,
+      "recovered_id": 2,
+      "candidate_id": 2,
+      "start_frame": 85,
+      "lost_last_frame": 61,
+      "gap_frames": 24,
+      "recover": true,
+      "mode": "both_slots",
+      "hits": {
+        "top": 27,
+        "bottom": 20
+      },
+      "avg_scores": {
+        "top": 0.7643055555555555,
+        "bottom": 0.7395101700000001
+      },
+      "final_score": 0.7519078627777778,
+      "matched_slots": [
+        "top",
+        "bottom"
+      ],
+      "observations": 30,
+      "lost_profile": {
+        "top": {
+          "class": "long_sleeve",
+          "colors": {
+            "purple": 2.56,
+            "dark_gray": 7.37,
+            "dark_blue": 5.3,
+            "gray": 5.33,
+            "denim": 24.7,
+            "blue": 38.989999999999995,
+            "indigo": 3.21,
+            "navy": 0.24,
+            "light_blue": 12.27
+          },
+          "count": 10
+        },
+        "bottom": {
+          "class": "trousers",
+          "colors": {
+            "dark_gray": 4.959999999999999,
+            "dark_blue": 15.610000000000003,
+            "gray": 20.887240000000002,
+            "blue": 1.7892700000000001,
+            "charcoal": 5.3100000000000005,
+            "black": 51.44348
+          },
+          "count": 10
+        }
+      }
+    },
+    {
+      "new_id": 26,
+      "recovered_id": 25,
+      "candidate_id": 25,
+      "start_frame": 317,
+      "lost_last_frame": 309,
+      "gap_frames": 8,
+      "recover": true,
+      "mode": "both_slots",
+      "hits": {
+        "top": 13,
+        "bottom": 30
+      },
+      "avg_scores": {
+        "top": 0.7621538461538461,
+        "bottom": 0.9105666666666666
+      },
+      "final_score": 0.8363602564102564,
+      "matched_slots": [
+        "top",
+        "bottom"
+      ],
+      "observations": 30,
+      "lost_profile": {
+        "top": {
+          "class": "short_sleeve",
+          "colors": {
+            "dark_gray": 11.7,
+            "brown": 7.7,
+            "dark_blue": 26.1,
+            "gray": 15.4,
+            "charcoal": 24.7,
+            "dark_purple": 4.1,
+            "black": 10.2
+          },
+          "count": 1
+        },
+        "bottom": {
+          "class": "trousers",
+          "colors": {
+            "charcoal": 58.3,
+            "dark_blue": 14.0,
+            "black": 24.5,
+            "dark_gray": 3.2
+          },
+          "count": 1
+        }
+      }
+    },
+    {
+      "new_id": 71,
+      "recovered_id": 2,
+      "candidate_id": 4,
+      "start_frame": 704,
+      "lost_last_frame": 667,
+      "gap_frames": 37,
+      "recover": true,
+      "mode": "both_slots",
+      "hits": {
+        "top": 26,
+        "bottom": 11
+      },
+      "avg_scores": {
+        "top": 0.7632763807692309,
+        "bottom": 0.81055945
+      },
+      "final_score": 0.7869179153846154,
+      "matched_slots": [
+        "top",
+        "bottom"
+      ],
+      "observations": 30,
+      "lost_profile": {
+        "top": {
+          "class": "long_sleeve",
+          "colors": {
+            "purple": 4.83789,
+            "pink": 1.2210100000000002,
+            "dark_gray": 2.9,
+            "dark_blue": 10.5,
+            "cyan": 0.11696,
+            "gray": 14.317359999999999,
+            "denim": 11.719999999999999,
+            "blue": 47.126,
+            "charcoal": 1.3199999999999998,
+            "red": 0.65008,
+            "dark_purple": 2.75,
+            "black": 2.1121899999999996
+          },
+          "count": 10
+        },
+        "bottom": {
+          "class": "trousers",
+          "colors": {
+            "purple": 0.53029,
+            "black": 45.910790000000006,
+            "gray": 38.108270000000005,
+            "blue": 15.329719999999998
+          },
+          "count": 10
+        }
+      }
+    },
+    {
+      "new_id": 95,
+      "recovered_id": 93,
+      "candidate_id": 93,
+      "start_frame": 1086,
+      "lost_last_frame": 1078,
+      "gap_frames": 8,
+      "recover": true,
+      "mode": "both_slots",
+      "hits": {
+        "top": 20,
+        "bottom": 13
+      },
+      "avg_scores": {
+        "top": 0.8631666666666667,
+        "bottom": 0.7435164835164835
+      },
+      "final_score": 0.8033415750915751,
+      "matched_slots": [
+        "top",
+        "bottom"
+      ],
+      "observations": 22,
+      "lost_profile": {
+        "top": {
+          "class": "long_sleeve",
+          "colors": {
+            "charcoal": 13.466666666666663,
+            "dark_blue": 47.23333333333333,
+            "black": 39.28333333333334
+          },
+          "count": 6
+        },
+        "bottom": {
+          "class": "trousers",
+          "colors": {
+            "dark_gray": 2.357142857142857,
+            "dark_blue": 51.24285714285713,
+            "gray": 1.957142857142857,
+            "denim": 11.142857142857142,
+            "blue": 0.7000000000000001,
+            "charcoal": 19.62857142857143,
+            "black": 12.985714285714286
+          },
+          "count": 7
+        }
+      }
+    },
+    {
+      "new_id": 134,
+      "recovered_id": 129,
+      "candidate_id": 129,
+      "start_frame": 1836,
+      "lost_last_frame": 1802,
+      "gap_frames": 34,
+      "recover": true,
+      "mode": "both_slots",
+      "hits": {
+        "top": 30,
+        "bottom": 27
+      },
+      "avg_scores": {
+        "top": 0.9187900000000001,
+        "bottom": 0.8046888888888888
+      },
+      "final_score": 0.8617394444444444,
+      "matched_slots": [
+        "top",
+        "bottom"
+      ],
+      "observations": 30,
+      "lost_profile": {
+        "top": {
+          "class": "long_sleeve",
+          "colors": {
+            "dark_gray": 2.3,
+            "dark_blue": 0.62,
+            "denim": 7.590000000000001,
+            "gray": 3.1999999999999997,
+            "blue": 82.69,
+            "navy": 0.21000000000000002,
+            "light_blue": 3.41
+          },
+          "count": 10
+        },
+        "bottom": {
+          "class": "trousers",
+          "colors": {
+            "dark_gray": 5.340000000000001,
+            "dark_blue": 46.480000000000004,
+            "gray": 4.8100000000000005,
+            "denim": 0.22999999999999998,
+            "charcoal": 10.84,
+            "navy": 6.779999999999999,
+            "black": 25.500000000000004
+          },
+          "count": 10
+        }
+      }
+    },
+    {
+      "new_id": 140,
+      "recovered_id": 137,
+      "candidate_id": 137,
+      "start_frame": 1966,
+      "lost_last_frame": 1965,
+      "gap_frames": 1,
+      "recover": true,
+      "mode": "both_slots",
+      "hits": {
+        "top": 25,
+        "bottom": 13
+      },
+      "avg_scores": {
+        "top": 0.7638739999999999,
+        "bottom": 0.8708500000000001
+      },
+      "final_score": 0.817362,
+      "matched_slots": [
+        "top",
+        "bottom"
+      ],
+      "observations": 30,
+      "lost_profile": {
+        "top": {
+          "class": "long_sleeve",
+          "colors": {
+            "dark_gray": 4.760000000000001,
+            "brown": 30.93,
+            "dark_orange": 17.14,
+            "gray": 5.130000000000001,
+            "light_brown": 17.740000000000002,
+            "tan": 1.8399999999999999,
+            "camel": 0.25,
+            "orange": 22.220000000000002
+          },
+          "count": 10
+        },
+        "bottom": {
+          "class": "trousers",
+          "colors": {
+            "dark_gray": 6.640000000000001,
+            "dark_blue": 27.35,
+            "denim": 8.85,
+            "charcoal": 43.31,
+            "navy": 1.15,
+            "dark_green": 2.5300000000000002,
+            "black": 10.14
+          },
+          "count": 10
+        }
+      }
+    },
+    {
+      "new_id": 147,
+      "recovered_id": 137,
+      "candidate_id": 140,
+      "start_frame": 2126,
+      "lost_last_frame": 2111,
+      "gap_frames": 15,
+      "recover": true,
+      "mode": "both_slots",
+      "hits": {
+        "top": 15,
+        "bottom": 30
+      },
+      "avg_scores": {
+        "top": 0.8045933333333333,
+        "bottom": 0.8047633333333336
+      },
+      "final_score": 0.8046783333333334,
+      "matched_slots": [
+        "top",
+        "bottom"
+      ],
+      "observations": 30,
+      "lost_profile": {
+        "top": {
+          "class": "long_sleeve",
+          "colors": {
+            "dark_gray": 2.8,
+            "brown": 48.95,
+            "dark_orange": 4.6,
+            "gray": 3.0300000000000002,
+            "charcoal": 0.8699999999999999,
+            "light_brown": 17.2,
+            "dark_brown": 1.19,
+            "mustard": 0.52,
+            "orange": 20.840000000000007
+          },
+          "count": 10
+        },
+        "bottom": {
+          "class": "trousers",
+          "colors": {
+            "charcoal": 0.44000000000000006,
+            "dark_blue": 68.58000000000001,
+            "dark_gray": 0.42000000000000004,
+            "denim": 30.55
+          },
+          "count": 10
+        }
+      }
+    },
+    {
+      "new_id": 242,
+      "recovered_id": 241,
+      "candidate_id": 241,
+      "start_frame": 3022,
+      "lost_last_frame": 3020,
+      "gap_frames": 2,
+      "recover": true,
+      "mode": "both_slots",
+      "hits": {
+        "top": 10,
+        "bottom": 10
+      },
+      "avg_scores": {
+        "top": 0.8333499999999999,
+        "bottom": 0.8861749999999999
+      },
+      "final_score": 0.8597625,
+      "matched_slots": [
+        "top",
+        "bottom"
+      ],
+      "observations": 11,
+      "lost_profile": {
+        "top": {
+          "class": "long_sleeve",
+          "colors": {
+            "dark_gray": 8.175,
+            "dark_blue": 52.65,
+            "gray": 15.600000000000001,
+            "denim": 17.175,
+            "charcoal": 5.725,
+            "black": 0.75
+          },
+          "count": 4
+        },
+        "bottom": {
+          "class": "trousers",
+          "colors": {
+            "dark_blue": 25.85,
+            "denim": 53.550000000000004,
+            "light_blue": 5.15,
+            "blue": 15.475
+          },
+          "count": 4
+        }
+      }
+    },
+    {
+      "new_id": 248,
+      "recovered_id": 239,
+      "candidate_id": 239,
+      "start_frame": 3051,
+      "lost_last_frame": 3025,
+      "gap_frames": 26,
+      "recover": true,
+      "mode": "both_slots",
+      "hits": {
+        "top": 22,
+        "bottom": 13
+      },
+      "avg_scores": {
+        "top": 0.8240500000000001,
+        "bottom": 0.7092175384615385
+      },
+      "final_score": 0.7666337692307692,
+      "matched_slots": [
+        "top",
+        "bottom"
+      ],
+      "observations": 30,
+      "lost_profile": {
+        "top": {
+          "class": "short_sleeve",
+          "colors": {
+            "dark_gray": 1.7399999999999998,
+            "dark_blue": 19.380000000000003,
+            "gray": 4.220000000000001,
+            "denim": 73.02000000000001,
+            "navy": 1.64
+          },
+          "count": 5
+        },
+        "bottom": {
+          "class": "trousers",
+          "colors": {
+            "dark_blue": 60.89999999999999,
+            "gray": 2.750085714285714,
+            "denim": 10.528571428571428,
+            "blue": 18.25397142857143,
+            "black": 7.530457142857143
+          },
+          "count": 7
+        }
+      }
+    }
+  ]
+}

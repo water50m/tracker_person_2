@@ -16,7 +16,7 @@
 
 สีละเอียดถูกกำหนดใน HSV Color Space (Hue: 0-179, Saturation: 0-255, Value: 0-255)
 
-### 1. โทนสีแดง (Red) - 5 สี
+### 1. โทนสีแดง (Red) - 6 สี
 | สี | ช่วง H | ช่วง S | ช่วง V | คำอธิบาย |
 |---|---|---|---|---|
 | red | 0-10 | 100-255 | 50-255 | แดงมาตรฐาน |
@@ -24,6 +24,7 @@
 | crimson | 0-8 | 150-255 | 80-180 | คริมสัน |
 | scarlet | 0-8 | 200-255 | 150-255 | สการ์เล็ต |
 | maroon | 0-10 | 100-200 | 30-90 | มาลูน |
+| burgundy | 170-180 | 80-220 | 25-120 | เบอร์กันดี |
 
 ### 2. โทนสีส้ม (Orange) - 5 สี
 | สี | ช่วง H | ช่วง S | ช่วง V | คำอธิบาย |
@@ -43,7 +44,7 @@
 | mustard | 25-40 | 100-200 | 100-180 | มัสตาร์ด |
 | khaki | 20-35 | 30-100 | 150-220 | กากี |
 
-### 4. โทนสีเขียว (Green) - 8 สี
+### 4. โทนสีเขียว/ฟ้าเขียว (Green/Cyan) - 10 สี
 | สี | ช่วง H | ช่วง S | ช่วง V | คำอธิบาย |
 |---|---|---|---|---|
 | green | 35-85 | 50-255 | 50-255 | เขียวมาตรฐาน |
@@ -54,8 +55,10 @@
 | forest_green | 40-70 | 80-200 | 30-100 | เขียวป่า |
 | mint | 70-85 | 30-100 | 180-255 | มิ้นต์ |
 | teal | 75-95 | 100-255 | 80-180 | ฟ้าเขียว |
+| cyan | 85-100 | 120-255 | 120-255 | ไซแอน |
+| aqua | 80-95 | 80-220 | 170-255 | อควา |
 
-### 5. โทนสีน้ำเงิน (Blue) - 8 สี
+### 5. โทนสีน้ำเงิน (Blue) - 10 สี
 | สี | ช่วง H | ช่วง S | ช่วง V | คำอธิบาย |
 |---|---|---|---|---|
 | blue | 85-135 | 50-255 | 50-255 | น้ำเงินมาตรฐาน |
@@ -66,6 +69,8 @@
 | royal_blue | 100-120 | 150-255 | 80-180 | น้ำเงินราชา |
 | cobalt | 105-125 | 150-255 | 100-200 | โคบอลต์ |
 | turquoise | 80-100 | 100-200 | 150-255 | ฟ้าคราม |
+| indigo | 115-140 | 80-255 | 40-140 | คราม |
+| denim | 95-125 | 40-180 | 60-170 | ยีนส์ |
 
 ### 6. โทนสีม่วง (Purple) - 8 สี
 | สี | ช่วง H | ช่วง S | ช่วง V | คำอธิบาย |
@@ -98,7 +103,7 @@
 | rose | 165-180 | 100-200 | 120-200 | กุหลาบ |
 | salmon | 0-15 | 100-200 | 150-255 | แซลมอน |
 
-### 9. โทนสีเทา/ขาว/ดำ (Grayscale) - 6 สี
+### 9. โทนสีเทา/ขาว/ดำ/ครีม (Grayscale/Off-white) - 8 สี
 | สี | ช่วง H | ช่วง S | ช่วง V | คำอธิบาย |
 |---|---|---|---|---|
 | black | 0-180 | 0-50 | 0-40 | ดำ |
@@ -107,6 +112,8 @@
 | light_gray | 0-180 | 0-30 | 180-220 | เทาอ่อน |
 | white | 0-180 | 0-30 | 220-255 | ขาว |
 | silver | 0-180 | 0-20 | 180-230 | เงิน |
+| charcoal | 0-180 | 0-35 | 20-70 | ชาร์โคล |
+| cream | 20-45 | 5-55 | 215-255 | ครีม |
 
 ---
 
@@ -118,16 +125,16 @@
 
 | กลุ่ม | สีที่รวม | จำนวน |
 |---|---|---|
-| **red_tones** | red, dark_red, crimson, scarlet, maroon | 5 |
+| **red_tones** | red, dark_red, crimson, scarlet, maroon, burgundy | 6 |
 | **orange_tones** | orange, dark_orange, amber, peach, coral | 5 |
 | **yellow_tones** | yellow, gold, light_yellow, mustard, khaki | 5 |
 | **green_tones** | green, dark_green, light_green, olive, lime, forest_green, mint, teal | 8 |
-| **blue_tones** | blue, dark_blue, light_blue, navy, sky_blue, royal_blue, cobalt, turquoise | 8 |
+| **blue_tones** | blue, dark_blue, light_blue, navy, sky_blue, royal_blue, cobalt, turquoise, cyan, aqua, indigo, denim | 12 |
 | **purple_tones** | purple, dark_purple, light_purple, violet, lavender, magenta, fuchsia, plum | 8 |
 | **brown_tones** | brown, dark_brown, light_brown, tan, beige, camel | 6 |
 | **pink_tones** | pink, light_pink, hot_pink, rose, salmon | 5 |
-| **white_tones** | white, light_gray, silver, beige | 4 |
-| **black_tones** | black, dark_gray | 2 |
+| **white_tones** | white, light_gray, silver, beige, cream | 5 |
+| **black_tones** | black, dark_gray, charcoal | 3 |
 
 ### 2. กลุ่มตามความสว่าง (3 กลุ่ม)
 

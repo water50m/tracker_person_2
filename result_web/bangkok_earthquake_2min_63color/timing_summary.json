@@ -1,0 +1,72 @@
+{
+  "clip_cut": {
+    "seconds": 141.731832,
+    "count": 1,
+    "avg_ms": 141731.8323
+  },
+  "clothing_postprocess": {
+    "seconds": 754.649125,
+    "count": 11941,
+    "avg_ms": 63.1982
+  },
+  "clothing_predict": {
+    "seconds": 307.55106,
+    "count": 11941,
+    "avg_ms": 25.7559
+  },
+  "detailed_color_analysis": {
+    "seconds": 728.507304,
+    "count": 22169,
+    "avg_ms": 32.8615
+  },
+  "file_write": {
+    "seconds": 31.147902,
+    "count": 1,
+    "avg_ms": 31147.9024
+  },
+  "final_outfit_vote": {
+    "seconds": 0.207413,
+    "count": 1,
+    "avg_ms": 207.4131
+  },
+  "image_save": {
+    "seconds": 99.047443,
+    "count": 11871,
+    "avg_ms": 8.3436
+  },
+  "iou_dedupe": {
+    "seconds": 0.202276,
+    "count": 3600,
+    "avg_ms": 0.0562
+  },
+  "model_load": {
+    "seconds": 1.152288,
+    "count": 1,
+    "avg_ms": 1152.2884
+  },
+  "person_detect_track": {
+    "seconds": 297.336297,
+    "count": 3600,
+    "avg_ms": 82.5934
+  },
+  "reid_apply": {
+    "seconds": 0.376622,
+    "count": 1,
+    "avg_ms": 376.6216
+  },
+  "sqlite_save": {
+    "seconds": 4.067803,
+    "count": 1,
+    "avg_ms": 4067.8026
+  },
+  "total_without_file_db_write": {
+    "seconds": 1642.012025,
+    "count": 1,
+    "avg_ms": 1642012.0248
+  },
+  "untracked_person_boxes_skipped": {
+    "seconds": 0.0,
+    "count": 26,
+    "avg_ms": 0.0
+  }
+}
