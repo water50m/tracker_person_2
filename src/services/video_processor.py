@@ -127,6 +127,7 @@ from services.ai_processing_types import (
 )
 from services.thread_pool_processor import ThreadPoolProcessor
 from services.frame_processor import FrameProcessor
+from services.clothing_postprocess import FinalOutfitVoter, StableClothingVoter
 
 
 # Type alias for progress callback
@@ -194,6 +195,8 @@ class VideoProcessor:
         
         # Detection batch buffer
         self._detection_batch: List[Dict] = []
+        self._stable_clothing_voter = StableClothingVoter()
+        self._final_outfit_voter = FinalOutfitVoter()
         
         # Progress tracking
         self._last_progress_update = 0
@@ -679,6 +682,8 @@ class VideoProcessor:
                                 if x2 > x and y2 > y:
                                     person_crop = frame[y:y2, x:x2]
                                     self._apply_hybrid_tracking(camera_id, person, person_crop, embedder)
+
+                            self._apply_clothing_votes(person, frame_number)
                             
                             # Call detection callback
                             if on_detection:
@@ -783,6 +788,7 @@ class VideoProcessor:
             self._stats.processing_time_ms = (time.perf_counter() - start_time) * 1000
             self._stats.end_time = time.perf_counter()
             self._stats.unique_persons = len(seen_person_ids)
+            self._stats.final_outfits = self._final_outfit_voter.summary()
             self._stats.completed = self._stats.status != ProcessingStatus.STOPPED
             
             if self._stats.status != ProcessingStatus.STOPPED:
@@ -953,6 +959,24 @@ class VideoProcessor:
         )
         
         return result
+
+    def _clothing_track_key(self, person: PersonDetection, frame_number: int) -> int | str:
+        track_id = person.persistent_id if person.persistent_id is not None else person.track_id
+        if track_id is None or track_id < 0:
+            return f"untracked:{frame_number}:{id(person)}"
+        return int(track_id)
+
+    def _apply_clothing_votes(self, person: PersonDetection, frame_number: int) -> None:
+        """Apply rolling and final outfit voting to a production detection."""
+        if not person.items:
+            return
+        track_key = self._clothing_track_key(person, frame_number)
+        self._final_outfit_voter.record(track_key, frame_number, person.items)
+        stable = self._stable_clothing_voter.update(track_key, person.items)
+        person.stable_items = stable.items
+        person.stable_label = stable.label
+        if stable.items:
+            person.items = stable.items
     
     def _add_to_batch(
         self,

@@ -153,6 +153,9 @@ class PersonDetection:
     
     # Clothing items detected on this person
     items: List[DetectedItem] = field(default_factory=list)
+    raw_items: List[DetectedItem] = field(default_factory=list)
+    stable_items: List[DetectedItem] = field(default_factory=list)
+    stable_label: Optional[str] = None
     
     # Re-ID embedding vector
     embedding: Optional[np.ndarray] = None
@@ -174,6 +177,9 @@ class PersonDetection:
             },
             "confidence": self.confidence,
             "items": [item.to_dict() for item in self.items],
+            "raw_items": [item.to_dict() for item in self.raw_items],
+            "stable_items": [item.to_dict() for item in self.stable_items],
+            "stable_label": self.stable_label,
             "frame_number": self.frame_number,
             "timestamp": self.timestamp,
         }
@@ -261,6 +267,7 @@ class VideoProcessingStats:
     
     # Error tracking
     num_errors: int = 0
+    final_outfits: Dict[str, Any] = field(default_factory=dict)
     
     @property
     def duration_seconds(self) -> float:
@@ -298,6 +305,7 @@ class VideoProcessingStats:
             "effective_fps": self.effective_fps,
             "processing_time_ms": self.processing_time_ms,
             "num_errors": self.num_errors,
+            "final_outfits": self.final_outfits,
         }
 
 
@@ -360,6 +368,7 @@ class StreamProcessingStats:
     
     # Error tracking
     num_errors: int = 0
+    final_outfits: Dict[str, Any] = field(default_factory=dict)
     
     @property
     def duration_seconds(self) -> float:
@@ -393,6 +402,7 @@ class StreamProcessingStats:
             "duration_seconds": self.duration_seconds,
             "effective_fps": self.effective_fps,
             "num_errors": self.num_errors,
+            "final_outfits": self.final_outfits,
         }
     
     # Processing metadata

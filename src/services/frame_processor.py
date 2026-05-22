@@ -41,6 +41,10 @@ from services.ai_processing_types import (
 )
 from services.model_manager import get_model_manager
 from config_loader import get_detection_confidence
+from services.clothing_postprocess import (
+    ClothingSelectionResult,
+    select_clothing_items,
+)
 
 
 class FrameProcessor:
@@ -301,8 +305,9 @@ class FrameProcessor:
         
         # Classify clothing (if enabled)
         if self.enable_classification and person_crop.size > 0:
-            items = self._classify_clothing(person_crop)
-            person.items = items
+            selection = self._classify_clothing(person_crop)
+            person.raw_items = selection.raw_items
+            person.items = selection.items
         
         return person
     
@@ -324,95 +329,40 @@ class FrameProcessor:
         Returns:
             List of DetectedItem objects (max 2 items)
         """
-        selected = []
-        has_top = False
-        has_bottom = False
-        
-        # TOP item keywords
-        top_keywords = ["long_sleeve", "short_sleeve"]
-        
-        for idx, pred in enumerate(predictions[:3]):  # Check top-3 for better matching
-            if len(pred) < 2:
-                continue
-                
-            class_name = pred[0]
-            conf = pred[1] if len(pred) > 1 else 0.0
-            bbox = pred[2] if len(pred) > 2 else None
-            
-            # Skip unknown predictions
-            if class_name == "Unknown":
-                continue
-            
-            # Determine category
-            is_top = class_name in top_keywords
-            category = ClothingCategory.TOP if is_top else ClothingCategory.BOTTOM
-            
-            if class_name == "Dress":
-                # Dress can pair with anything, add it as BOTTOM
-                item = DetectedItem(
-                    class_name=class_name,
-                    category=ClothingCategory.FULL_BODY,
-                    confidence=conf,
-                )
-                if bbox is not None:
-                    item.relative_bbox = BoundingBox.from_xyxy(*bbox)
-                selected.append(item)
-                has_bottom = True
-            elif is_top and not has_top:
-                item = DetectedItem(
-                    class_name=class_name,
-                    category=ClothingCategory.TOP,
-                    confidence=conf,
-                )
-                if bbox is not None:
-                    item.relative_bbox = BoundingBox.from_xyxy(*bbox)
-                selected.append(item)
-                has_top = True
-            elif not is_top and not has_bottom:
-                item = DetectedItem(
-                    class_name=class_name,
-                    category=ClothingCategory.BOTTOM,
-                    confidence=conf,
-                )
-                if bbox is not None:
-                    item.relative_bbox = BoundingBox.from_xyxy(*bbox)
-                selected.append(item)
-                has_bottom = True
-            
-            # Stop when we have 2 items
-            if len(selected) >= 2:
-                break
-        
+        selection = select_clothing_items(predictions)
+        selected = selection.items
         selected_items_log = [{"class": s.class_name, "category": s.category.value} for s in selected]
-        print(f"[FRAME_PROC] select_items_by_rules applied")
+        print(f"[FRAME_PROC] production clothing rules applied")
         print(f"[FRAME_PROC] Selected items: {selected_items_log}")
-        
-        return selected[:2]  # Max 2 items
+
+        return selected
 
     def _classify_clothing(
         self,
         person_crop: np.ndarray,
-    ) -> List[DetectedItem]:
+    ) -> ClothingSelectionResult:
         """
         Classify clothing items in the person crop.
         
         Returns:
-            List of DetectedItem objects (max 2 items based on rules)
+            ClothingSelectionResult with raw model items and tuned items.
         """
         classifier = self._get_classifier()
         
         try:
             # Get top-N predictions (get more to apply rules)
             if isinstance(self.classifier_top_n, str) and self.classifier_top_n.lower() == "all":
-                predictions = classifier.predict_top_n(person_crop, top_n=5)
+                predictions = classifier.predict_top_n(person_crop, top_n="all")
             elif isinstance(self.classifier_top_n, int):
-                # Get at least 3 to apply selection rules
-                predictions = classifier.predict_top_n(person_crop, top_n=max(3, self.classifier_top_n))
+                # Get enough candidates for dress/skirt/top/bottom rules.
+                predictions = classifier.predict_top_n(person_crop, top_n=max(6, self.classifier_top_n))
             else:
-                predictions = classifier.predict_top_n(person_crop, top_n=3)
+                predictions = classifier.predict_top_n(person_crop, top_n=6)
             
-            # Apply selection rules (1 TOP + 1 BOTTOM max)
-            selected_items = self._select_items_by_rules(predictions)
+            # Apply production rules: top/bottom/dress grouping, dress companion
+            # threshold, skirt-vs-dress adjustment, and max-2 output.
+            selection = select_clothing_items(predictions)
+            selected_items = selection.items
             
             # Analyze colors for selected items
             if self.enable_color_analysis:
@@ -425,12 +375,12 @@ class FrameProcessor:
                     color_str = item.primary_color.color_name if item.primary_color else (item.color_groups[0] if item.color_groups else "Unknown")
                     print(f"[FRAME_PROC] Color analysis for {item.class_name}: {color_time:.2f}ms, primary_color={color_str}, color_groups={item.color_groups}")
 
-            return selected_items
+            return selection
         
         except Exception as e:
             # Classification failure - return empty list
             print(f"[FrameProcessor] Classification error: {e}")
-            return []
+            return ClothingSelectionResult()
     
     def _infer_category(self, class_name: str) -> ClothingCategory:
         """
