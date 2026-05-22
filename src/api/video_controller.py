@@ -13,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 from src.services.database import DatabaseService
 from src.services.storage import StorageService
 from src.api.schemas import DetectionResponse
+from src.config_loader import get_storage_mode
+from src.services.clothing_postprocess import FinalOutfitVoter, StableClothingVoter, select_clothing_items
 import yt_dlp
 
 # Add src to path for Feature Flag and VideoProcessor
@@ -21,6 +23,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # Refactored VideoProcessor (lazy import to avoid loading if not used)
 _video_processor = None
 _thread_pool = None
+
+
+def _force_local_only_in_json_mode(save_to_db: bool, save_images: bool, save_bbox_images: bool) -> tuple[bool, bool, bool]:
+    if get_storage_mode() != "json":
+        return save_to_db, save_images, save_bbox_images
+    if save_to_db or save_images or save_bbox_images:
+        print("[VideoController] JSON storage mode active; DB/MinIO save flags forced off.")
+    return False, False, False
 
 async def _get_video_processor():
     """Lazy initialization of VideoProcessor with thread pool"""
@@ -36,8 +46,8 @@ async def _get_video_processor():
         _video_processor = VideoProcessor(
             thread_pool=_thread_pool,
             frame_skip=30,
-            save_to_db=True,
-            save_images=True,
+            save_to_db=get_storage_mode() == "db",
+            save_images=get_storage_mode() == "db",
         )
     
     return _video_processor, _thread_pool
@@ -1169,6 +1179,19 @@ def _parse_top_n(value: str) -> int | str:
         return 1
 
 
+def _item_bbox_xyxy(item) -> list[int] | None:
+    if not item.relative_bbox:
+        return None
+    return list(item.relative_bbox.to_xyxy())
+
+
+def _frame_bbox_from_person_relative(item, person_x: int, person_y: int) -> tuple[int, int, int, int] | None:
+    if not item.relative_bbox:
+        return None
+    x1, y1, x2, y2 = item.relative_bbox.to_xyxy()
+    return person_x + x1, person_y + y1, person_x + x2, person_y + y2
+
+
 async def _realtime_analysis_generator(
     video_path: str,
     stream_id: str,
@@ -1257,6 +1280,8 @@ async def _realtime_analysis_generator(
     # Track IDs for detector
     track_id_mapping: dict[int, int] = {}  # byte_track_id -> our_id
     next_track_id = 1
+    stable_clothing_voter = StableClothingVoter()
+    final_outfit_voter = FinalOutfitVoter()
     
     frame_count = 0
     last_process_time = asyncio.get_event_loop().time()
@@ -1266,6 +1291,9 @@ async def _realtime_analysis_generator(
             ret, frame = cap.read()
             if not ret:
                 print(f"✅ [Stream {stream_id}] Video ended at frame {frame_count}")
+                final_outfits = final_outfit_voter.summary()
+                if final_outfits.get("track_count"):
+                    print(f"👕 [Stream {stream_id}] Final outfit votes: {final_outfits}")
                 # Send video end notification
                 if save_to_db and db and video_id:
                     try:
@@ -1341,18 +1369,30 @@ async def _realtime_analysis_generator(
                         # Extract person crop for classification
                         person_crop = frame[y1:y2, x1:x2]
                         
-                        # Get classification predictions
-                        class_predictions = []
+                        # Get classification predictions and apply production clothing flow.
+                        raw_class_predictions = []
+                        tuned_items = []
+                        stable_items = []
                         if person_crop.size > 0 and classifier.model is not None:
-                            class_predictions = classifier.predict_top_n(person_crop, top_n=classifier_top_n)
+                            prediction_top_n = "all" if classifier_top_n == "all" else max(6, int(classifier_top_n or 1))
+                            raw_class_predictions = classifier.predict_top_n(person_crop, top_n=prediction_top_n)
+                            selection = select_clothing_items(raw_class_predictions)
+                            tuned_items = selection.items
+                            track_key = our_id if our_id is not None else f"untracked:{frame_count}:{x1}:{y1}"
+                            final_outfit_voter.record(track_key, frame_count, tuned_items)
+                            stable_vote = stable_clothing_voter.update(track_key, tuned_items)
+                            stable_items = stable_vote.items or tuned_items
+                        class_predictions = [
+                            (item.class_name, item.confidence, _item_bbox_xyxy(item))
+                            for item in stable_items
+                        ]
                         
                         # Save to database if enabled
                         if db and our_id is not None:
                             try:
-                                # Extract clothing category
-                                clothing_category = None
-                                if class_predictions:
-                                    clothing_category = class_predictions[0][0]  # Get top prediction
+                                # Extract tuned/stable clothing category
+                                primary_item = stable_items[0] if stable_items else None
+                                clothing_category = primary_item.class_name if primary_item else None
 
                                 # Unified color analysis
                                 from src.ai.color_analysis_unified import analyze_person_colors, build_db_detection_data
@@ -1402,7 +1442,7 @@ async def _realtime_analysis_generator(
                                 detection_data = build_db_detection_data(
                                     track_id=our_id,
                                     clothing_type=clothing_category or "unknown",
-                                    confidence=class_predictions[0][1] if class_predictions else 0.0,
+                                    confidence=primary_item.confidence if primary_item else 0.0,
                                     color_results=color_results,
                                     bbox=[x1, y1, x2, y2],
                                     camera_id=effective_camera_id,
@@ -1437,6 +1477,19 @@ async def _realtime_analysis_generator(
                                         primary_color=color_results.get('primary_detailed_color', 'unknown'),
                                         primary_tone_group=color_results.get('primary_tone_group', 'unknown'),
                                     )
+                                    db.insert_detection_items(
+                                        detection_id=detection_id,
+                                        items=[
+                                            {
+                                                "item_index": idx + 1,
+                                                "class_name": item.class_name,
+                                                "category": item.category.value if item.category else None,
+                                                "confidence": item.confidence,
+                                                "bbox": _item_bbox_xyxy(item),
+                                            }
+                                            for idx, item in enumerate(stable_items)
+                                        ],
+                                    )
                                 
                                 print(f"✅ [Stream {stream_id}] Saved track {our_id} with color: {detection_data['primary_detailed_color']}")
 
@@ -1451,9 +1504,10 @@ async def _realtime_analysis_generator(
                         
                         # Draw classifier bbox (if different)
                         if show_classifier_bbox:
-                            for idx, (cls_name, conf, bbox) in enumerate(class_predictions):
-                                if bbox is not None:
-                                    cx1, cy1, cx2, cy2 = bbox
+                            for idx, item in enumerate(stable_items):
+                                frame_bbox = _frame_bbox_from_person_relative(item, x1, y1)
+                                if frame_bbox is not None:
+                                    cx1, cy1, cx2, cy2 = frame_bbox
                                     color = (255, 0, 255) if idx == 0 else (255, 128, 0)
                                     cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), color, 1)
                         
@@ -1465,16 +1519,18 @@ async def _realtime_analysis_generator(
                             labels.append(f"ID:{our_id}")
                         
                         # Class name(s) label
-                        if show_classifier_class_name and class_predictions:
-                            for idx, (cls_name, conf, _) in enumerate(class_predictions):
+                        if show_classifier_class_name and stable_items:
+                            for idx, item in enumerate(stable_items):
+                                cls_name = item.class_name
+                                conf = item.confidence
                                 if idx == 0:
                                     labels.append(f"{cls_name} ({conf:.2f})")
                                 else:
                                     labels.append(f"  {cls_name} ({conf:.2f})")
                         
                         # Class count label
-                        if show_classifier_count and class_predictions:
-                            labels.append(f"[Classes: {len(class_predictions)}]")
+                        if show_classifier_count and stable_items:
+                            labels.append(f"[Classes: {len(stable_items)}]")
                         
                         # Draw labels
                         if labels:
@@ -1576,6 +1632,11 @@ async def stream_analyze_video(
     
     # Parse top_n
     parsed_top_n = _parse_top_n(classifier_top_n)
+    save_to_db, save_images, save_bbox_images = _force_local_only_in_json_mode(
+        save_to_db,
+        save_images,
+        save_bbox_images,
+    )
     
     async def _cleanup_wrapper():
         """Wrapper to clean up when stream ends."""
@@ -1668,6 +1729,11 @@ async def analyze_video_cv2(
     camera_id = request.get("camera_id", None)
     save_images = request.get("save_images", True)
     save_bbox_images = request.get("save_bbox_images", True)
+    save_to_db, save_images, save_bbox_images = _force_local_only_in_json_mode(
+        save_to_db,
+        save_images,
+        save_bbox_images,
+    )
 
     print(f"📋 [CV2 API] Parsed params: save_to_db={save_to_db}, camera_id={camera_id}, save_images={save_images}, save_bbox_images={save_bbox_images}")
     
@@ -1737,6 +1803,11 @@ async def analyze_video_background(
     save_to_db = request.get("save_to_db", True)
     save_images = request.get("save_images", True)
     save_bbox_images = request.get("save_bbox_images", True)
+    save_to_db, save_images, save_bbox_images = _force_local_only_in_json_mode(
+        save_to_db,
+        save_images,
+        save_bbox_images,
+    )
 
     # Validate and fix camera_id - reject "background" as it's not a valid camera identifier
     if not camera_id or camera_id.lower() == "background":
