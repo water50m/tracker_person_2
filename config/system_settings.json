@@ -7,6 +7,11 @@
     "user": "admin",
     "password": "password1234"
   },
+  "storage": {
+    "mode": "json",
+    "json_root": "track_result",
+    "json_index": "track_result/json_jobs/index.json"
+  },
   "paths": {
     "upload_dir": "uploads",
     "output_dir": "output",

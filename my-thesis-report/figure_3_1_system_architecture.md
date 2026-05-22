@@ -49,7 +49,14 @@ graph TB
     VP --> ReaderThread
     VP --> ResumeState
     VP --> TP
-    TP --> FP
+    TP --> W1
+    TP --> W2
+    TP --> W3
+    TP --> W4
+    W1 --> FP
+    W2 --> FP
+    W3 --> FP
+    W4 --> FP
     FP --> YOLO
     YOLO --> ByteTrack
     ByteTrack --> Classifier

@@ -30,7 +30,7 @@ interface DebugPanelProps {
       class_name?: string;
       color?: string;
       category?: string;
-      confidence: number;
+      confidence?: number;
       detailed_colors?: Record<string, number>;
       color_categories?: {
         brightness_groups?: Record<string, number>;
@@ -145,7 +145,7 @@ export function DebugPanel({ lastImage, response }: DebugPanelProps) {
                       <div className="flex items-center gap-2 text-slate-300 mb-1">
                         <span className="text-cyan-400">{idx + 1}.</span>
                         <span className="font-medium">{item.class_name}</span>
-                        <span className="text-slate-500"> {(item.confidence * 100).toFixed(1)}% </span>
+                        <span className="text-slate-500"> {(((item.confidence ?? 0) * 100).toFixed(1))}% </span>
                       </div>
                       {itemColors.length > 0 && (
                         <div className="flex flex-wrap gap-1 ml-5">

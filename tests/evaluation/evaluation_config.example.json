@@ -1,0 +1,30 @@
+{
+  "clothing": {
+    "manifest": "datasets/deepfashion2_crops_eval.csv",
+    "image_root": "datasets/deepfashion2",
+    "model": "models/prepare_dataset.pt",
+    "output": "my-thesis-report/qa/clothing-model-eval.json"
+  },
+  "color": {
+    "manifest": "datasets/color_crops_eval.csv",
+    "image_root": "datasets/color_crops",
+    "output": "my-thesis-report/qa/color-analysis-eval.json"
+  },
+  "tracking": {
+    "video": "datasets/videos/eval_occlusion.mp4",
+    "ground_truth": "datasets/videos/eval_occlusion_mot.csv",
+    "output_dir": "my-thesis-report/qa/tracking-reid",
+    "frame_skip": 5,
+    "camera_id": "EVAL-CAM-01",
+    "mode": "both"
+  },
+  "search": {
+    "queries": "datasets/search_eval_queries.csv",
+    "results": "datasets/search_eval_results.csv",
+    "output": "my-thesis-report/qa/search-eval.json"
+  },
+  "database_audit": {
+    "input": "my-thesis-report/qa/tracking-reid/tracking-detections.csv",
+    "output": "my-thesis-report/qa/detection-export-audit.json"
+  }
+}

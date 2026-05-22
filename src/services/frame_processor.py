@@ -157,13 +157,14 @@ class FrameProcessor:
             
             # Step 2: Process each detected person
             person_detections = []
-            for track_id, bbox, confidence in detections:
+            for track_id, bbox, confidence, detector_embedding in detections:
                 person = self._process_person(
                     frame,
                     track_id,
                     bbox,
                     confidence,
                     frame_number,
+                    detector_embedding,
                 )
                 person_detections.append(person)
             
@@ -195,12 +196,12 @@ class FrameProcessor:
         self,
         frame: np.ndarray,
         frame_number: int = 0,
-    ) -> List[Tuple[int, BoundingBox, float]]:
+    ) -> List[Tuple[int, BoundingBox, float, Optional[np.ndarray]]]:
         """
         Detect persons in frame.
         
         Returns:
-            List of tuples: (track_id, bbox, confidence)
+            List of tuples: (track_id, bbox, confidence, person_embedding)
         """
         yolo_start = time.perf_counter()
         detector = self._get_detector()
@@ -221,7 +222,13 @@ class FrameProcessor:
         
         print(f"[FRAME_PROC] YOLO detected: {len(result.boxes)} persons")
         
-        for box in result.boxes:
+        person_embeddings = (
+            getattr(result, "person_embeddings", None)
+            or getattr(detector, "last_person_embeddings", [])
+            or []
+        )
+
+        for idx, box in enumerate(result.boxes):
             # Get confidence
             confidence = box.conf.item() if hasattr(box, 'conf') else 0.0
             
@@ -237,8 +244,9 @@ class FrameProcessor:
             # Get bounding box
             x1, y1, x2, y2 = map(int, box.xyxy[0])
             bbox = BoundingBox.from_xyxy(x1, y1, x2, y2)
+            person_embedding = person_embeddings[idx] if idx < len(person_embeddings) else None
             
-            detections.append((track_id, bbox, confidence))
+            detections.append((track_id, bbox, confidence, person_embedding))
         
         return detections
     
@@ -249,6 +257,7 @@ class FrameProcessor:
         bbox: BoundingBox,
         confidence: float,
         frame_number: int,
+        detector_embedding: Optional[np.ndarray] = None,
     ) -> PersonDetection:
         """
         Process a single detected person.
@@ -281,7 +290,10 @@ class FrameProcessor:
         # Extract embedding (if enabled)
         if self.enable_embedding:
             try:
-                embedding, cloth_names = self._get_embedder().get_embedding(person_crop)
+                embedding, cloth_names = self._get_embedder().get_embedding(
+                    person_crop,
+                    person_embedding=detector_embedding,
+                )
                 person.embedding = embedding
             except Exception as e:
                 # Embedding failure is not fatal

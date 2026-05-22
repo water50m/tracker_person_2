@@ -6,16 +6,15 @@ import { useState } from "react";
 
 const NAV_ITEMS = [
   {
-    href: "/dashboard",
+    href: "/realtime",
     icon: (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5">
-        <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" />
-        <circle cx="12" cy="12" r="3" />
+        <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
       </svg>
     ),
-    label: "DASHBOARD",
-    sublabel: "LIVE MONITOR",
-    accent: "cyan",
+    label: "PROCESSING",
+    sublabel: "VIDEO JOBS",
+    accent: "red",
   },
   {
     href: "/investigation",
@@ -28,54 +27,6 @@ const NAV_ITEMS = [
     label: "INVESTIGATION",
     sublabel: "SEARCH & TRACE",
     accent: "pink",
-  },
-  {
-    href: "/realtime",
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5">
-        <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-      </svg>
-    ),
-    label: "REALTIME",
-    sublabel: "LIVE AI ANALYSIS",
-    accent: "red",
-  },
-  {
-    href: "/input-manager",
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5">
-        <path d="M15 10l4.553-2.277A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
-      </svg>
-    ),
-    label: "INPUT MGR",
-    sublabel: "VIDEO & STREAMS",
-    accent: "yellow",
-  },
-  {
-    href: "/search",
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5">
-        <circle cx="11" cy="11" r="8" />
-        <path d="m21 21-4.35-4.35" />
-        <path d="M11 7v4M9 9h4" />
-      </svg>
-    ),
-    label: "SEARCH",
-    sublabel: "QUERY & FILTER",
-    accent: "green",
-  },
-  {
-    href: "/camera-management",
-    icon: (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5">
-        <path d="M15 10l4.553-2.277A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
-        <circle cx="8" cy="12" r="1.5" />
-        <path d="M19 3l2 2-9 9-3 1 1-3 9-9z" opacity="0.4" />
-      </svg>
-    ),
-    label: "CAM MGR",
-    sublabel: "CAMERA MANAGER",
-    accent: "violet",
   },
   {
     href: "/system",
@@ -234,9 +185,8 @@ export default function Sidebar() {
       {!collapsed && (
         <div className="px-3 py-3 border-t border-cyan-900/20 space-y-1.5">
           <StatusRow label="AI ENGINE" status="online" />
-          <StatusRow label="DATABASE" status="online" />
-          <StatusRow label="STREAM 1" status="online" />
-          <StatusRow label="STREAM 2" status="warn" />
+          <StatusRow label="JSON STORE" status="online" />
+          <StatusRow label="WORKER" status="online" />
         </div>
       )}
 

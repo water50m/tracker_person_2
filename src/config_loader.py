@@ -116,6 +116,25 @@ def get_log_dir() -> str:
     return config["paths"]["log_dir"]
 
 
+def get_storage_mode() -> str:
+    """Get active persistence mode: 'db' or 'json'."""
+    config = load_config()
+    mode = config.get("storage", {}).get("mode", "db")
+    return str(mode).lower()
+
+
+def get_json_storage_root() -> str:
+    """Get root directory for JSON result storage."""
+    config = load_config()
+    return config.get("storage", {}).get("json_root", "track_result")
+
+
+def get_json_storage_index() -> str:
+    """Get optional JSON job index path."""
+    config = load_config()
+    return config.get("storage", {}).get("json_index", "track_result/json_jobs/index.json")
+
+
 def reload_config() -> Dict[str, Any]:
     """Force reload configuration from disk."""
     return load_config(force_reload=True)

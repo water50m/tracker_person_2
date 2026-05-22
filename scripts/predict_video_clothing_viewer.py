@@ -211,22 +211,40 @@ def update_track_votes(
             slots[slot] = deque(maxlen=window)
         slots[slot].append(class_name)
 
-    stable: list[dict[str, Any]] = []
+    slot_items: dict[str, dict[str, Any]] = {}
     for slot in ("top", "dress", "bottom"):
         history = slots.get(slot)
         if not history:
             continue
         counts = Counter(history)
         class_name, votes = counts.most_common(1)[0]
-        stable.append(
-            {
-                "slot": slot,
-                "class": class_name,
-                "votes": votes,
-                "total": len(history),
-                "ratio": votes / len(history) if history else 0,
-            }
-        )
+        slot_items[slot] = {
+            "slot": slot,
+            "class": class_name,
+            "votes": votes,
+            "total": len(history),
+            "ratio": votes / len(history) if history else 0,
+        }
+
+    stable: list[dict[str, Any]]
+    dress = slot_items.get("dress")
+    top = slot_items.get("top")
+    bottom = slot_items.get("bottom")
+    if dress and (dress["votes"], dress["ratio"]) >= max(
+        (top["votes"], top["ratio"]) if top else (0, 0.0),
+        (bottom["votes"], bottom["ratio"]) if bottom else (0, 0.0),
+    ):
+        companions = []
+        if top:
+            companions.append(top)
+        if bottom and bottom["class"] == "trousers":
+            companions.append(bottom)
+        companion = max(companions, key=lambda item: (item["votes"], item["ratio"]), default=None)
+        stable = [dress] + ([companion] if companion else [])
+    else:
+        stable = [item for item in (top, bottom) if item]
+
+    stable = sorted(stable[:2], key=lambda item: {"top": 0, "dress": 1, "bottom": 2}.get(item["slot"], 99))
     classes = ordered_class_names(item["class"] for item in stable)
     return {"items": stable, "classes": classes, "label": ", ".join(classes) if classes else "unknown"}
 
@@ -473,12 +491,6 @@ def write_viewer(path: Path, video_url: str, frame_clip_url: str | None = None, 
 <section class="controls">
   <button id="playPauseBtn">Play/Pause</button>
   <button id="stopBtn">Stop</button>
-  <label>Clip
-    <select id="clipSelect">
-      <option value="first" selected>2 นาทีแรก</option>
-      <option value="frameClip">Frame 1000-1999</option>
-    </select>
-  </label>
   <label>Box mode
     <select id="boxMode">
       <option value="person" selected>คน</option>
@@ -487,8 +499,9 @@ def write_viewer(path: Path, video_url: str, frame_clip_url: str | None = None, 
     </select>
   </label>
   <label><input id="showLabels" type="checkbox" checked> แสดงชื่อ class + id</label>
+  <label><input id="showClothingConf" type="checkbox" checked> แสดง conf เสื้อผ้า</label>
   <label><input id="showDots" type="checkbox" checked> แสดงจุดสีด้านล่าง bbox</label>
-  <label><input id="showRawClothing" type="checkbox"> แสดง clothing raw boxes</label>
+  <label><input id="showRawClothing" type="checkbox"> แสดงผลก่อนจูน rules (raw boxes)</label>
   <span class="status" id="status"></span>
 </section>
 <section class="filters">
@@ -505,11 +518,6 @@ const frameByIndex = new Map(data.frames.map(row => [row.frame, row]));
 const frameNumbers = data.frames.map(row => row.frame).sort((a, b) => a - b);
 const colors = data.metadata.class_colors || {{}};
 const classOrder = data.metadata.class_display_order || ["short_sleeve", "long_sleeve", "dress", "shorts", "trousers", "skirt"];
-const clips = {{
-  first: {{ url: "{video_url}", startFrame: 0 }},
-  frameClip: {{ url: "{frame_clip_url or video_url}", startFrame: {frame_clip_start} }}
-}};
-
 function activeClasses() {{
   return new Set([...document.querySelectorAll('.classFilter:checked')].map(el => el.value));
 }}
@@ -669,10 +677,26 @@ function drawBox(bbox, color, label, dashed = false, dotColors = null) {{
   drawLabel(label, x1, y1, color);
   drawDots(x1, y1, x2, y2, dotColors || [color]);
 }}
+function bestDetectionsByClass(items, filters) {{
+  const best = {{}};
+  for (const det of items || []) {{
+    if (!filters.has(det.class)) continue;
+    const old = best[det.class];
+    if (!old || Number(det.confidence || 0) > Number(old.confidence || 0)) {{
+      best[det.class] = det;
+    }}
+  }}
+  return orderedClassNames(Object.keys(best)).map(name => best[name]);
+}}
+function personClothingLabel(items, filters, includeConf) {{
+  return bestDetectionsByClass(items, filters).map(det => {{
+    const conf = includeConf ? ` ${{Number(det.confidence || 0).toFixed(2)}}` : '';
+    return `${{det.class}}${{conf}}`;
+  }}).join(', ');
+}}
 function currentFrameData() {{
   const fps = data.metadata.fps || 30;
-  const clip = clips[document.getElementById('clipSelect').value] || clips.first;
-  const frame = clip.startFrame + Math.round(video.currentTime * fps);
+  const frame = Math.round(video.currentTime * fps);
   if (frameByIndex.has(frame)) return frameByIndex.get(frame);
   let lo = 0, hi = frameNumbers.length - 1, best = frameNumbers[0];
   while (lo <= hi) {{
@@ -698,22 +722,20 @@ function draw() {{
     const resultClothing = person.result_clothing || person.clothing || [];
     if (!showRaw && resultClothing.length === 0) continue;
     if (showRaw && resultClothing.length === 0 && !(person.raw_clothing || []).length) continue;
-    const finalClasses = (person.final_outfit && person.final_outfit.classes) || [];
-    const resultClasses = finalClasses.length ? finalClasses : resultClothing.map(det => det.class);
-    const keptClasses = orderedClassNames(resultClasses).filter(name => filters.has(name));
-    const finalLabel = person.final_outfit && person.final_outfit.label;
-    const personLabelText = finalLabel || keptClasses.join(', ');
+    const labelClothing = showRaw ? (person.raw_clothing || []) : resultClothing;
+    const personLabelText = personClothingLabel(labelClothing, filters, document.getElementById('showClothingConf').checked);
     const personLabel = `ID ${{person.id}}${{personLabelText ? ': ' + personLabelText : ''}}`;
     if (mode === 'person' || mode === 'both') {{
       drawBox(person.bbox, person.color || '#00a6fb', personLabel, false, personDotColors(person));
     }}
     if (mode === 'clothing' || mode === 'both') {{
-      const clothing = showRaw ? (person.raw_clothing || []) : resultClothing;
+      const clothing = labelClothing;
       for (const det of clothing) {{
         if (!filters.has(det.class)) continue;
         const color = colors[det.class] || '#ffffff';
         const sourceLabel = showRaw ? 'RAW ' : '';
-        const label = `${{sourceLabel}}ID ${{person.id}} ${{det.class}} ${{Number(det.confidence || 0).toFixed(2)}}`;
+        const confText = document.getElementById('showClothingConf').checked ? ` ${{Number(det.confidence || 0).toFixed(2)}}` : '';
+        const label = `${{sourceLabel}}ID ${{person.id}} ${{det.class}}${{confText}}`;
         drawBox(det.bbox, color, label, !det.kept, [dominantAnalyzedColor(det) || color]);
       }}
     }}
@@ -723,14 +745,6 @@ function draw() {{
 }}
 document.getElementById('playPauseBtn').onclick = () => video.paused ? video.play() : video.pause();
 document.getElementById('stopBtn').onclick = () => {{ video.pause(); video.currentTime = 0; draw(); }};
-document.getElementById('clipSelect').onchange = (event) => {{
-  const clip = clips[event.target.value] || clips.first;
-  video.pause();
-  video.src = clip.url;
-  video.currentTime = 0;
-  video.load();
-  draw();
-}};
 document.querySelectorAll('input, select').forEach(el => el.addEventListener('change', draw));
 window.addEventListener('resize', draw);
 video.addEventListener('loadedmetadata', draw);

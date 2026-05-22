@@ -66,4 +66,14 @@ node_modules/
 temp_queue_videos/
 temp_videos/
 *.mp4
+*.avi
+*.mov
+*.mkv
 *.pt
+
+# generated evaluation outputs / local model runtime
+track_result/
+.ultralytics/
+resume_states/
+my-thesis-report/qa/tracking-bytetrack-*/
+realtime_tracker_kit/

@@ -106,6 +106,7 @@ class HybridTracker:
         embedder = None,
         detailed_colors: Optional[Dict[str, float]] = None,
         color_groups: Optional[Dict[str, float]] = None,
+        precomputed_embedding: Optional[np.ndarray] = None,
     ) -> Tuple[int, bool, bool]:
         """
         Match ByteTrack ID to our persistent ID or create new track.
@@ -138,7 +139,11 @@ class HybridTracker:
             if person_crop is not None and person_crop.size > 0 and embedder is not None:
                 try:
                     # Extract features
-                    embedding, clothes = embedder.get_embedding(person_crop)
+                    if precomputed_embedding is not None:
+                        embedding = precomputed_embedding
+                        clothes = []
+                    else:
+                        embedding, clothes = embedder.get_embedding(person_crop)
                     
                     if detailed_colors is None or color_groups is None:
                         # Compute color features

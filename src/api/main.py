@@ -19,6 +19,8 @@ from src.api.routes.settings_api import router as settings_api_router
 from src.api.routes.log_manager import router as log_manager_router
 from src.api.routes.dashboard_api import router as dashboard_api_router
 from src.api.routes.video_queue import router as video_queue_router
+from src.api.routes.json_controller import router as json_controller_router
+from src.config_loader import get_storage_mode
 from src.services.database import DatabaseService
 
 
@@ -28,26 +30,44 @@ async def lifespan(app: FastAPI):
     # ── Startup: revert any videos stuck in 'processing' to 'paused' ──────────
     # This handles abrupt server restarts / crashes where the finally block
     # in background_processor.py never had a chance to run.
-    try:
-        db = DatabaseService()
-        with db.conn.cursor() as cur:
-            cur.execute(
-                "UPDATE processed_videos SET status = 'paused' "
-                "WHERE status = 'processing'"
-            )
-            count = cur.rowcount
-        db.conn.commit()
-        if count > 0:
-            print(f"⚠️ [Startup] Marked {count} interrupted video(s) as 'paused' (server was likely restarted mid-process).")
-    except Exception as e:
-        print(f"⚠️ [Startup] Could not clean up stuck videos: {e}")
+    if get_storage_mode() == "db":
+        try:
+            db = DatabaseService()
+            if db.conn is not None:
+                with db.conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE processed_videos SET status = 'paused' "
+                        "WHERE status = 'processing'"
+                    )
+                    count = cur.rowcount
+                db.conn.commit()
+                if count > 0:
+                    print(f"⚠️ [Startup] Marked {count} interrupted video(s) as 'paused' (server was likely restarted mid-process).")
+        except Exception as e:
+            print(f"⚠️ [Startup] Could not clean up stuck videos: {e}")
+    else:
+        print("ℹ️ [Startup] JSON storage mode active; skipped database startup cleanup.")
 
     yield  # Application runs here
     # (Add shutdown cleanup here if needed)
 
 
-controller = DetectionController()
 app = FastAPI(title="CCTV AI Analytics System", lifespan=lifespan)
+
+
+class LazyDetectionController:
+    """Delay database-backed controller creation until a DB endpoint is used."""
+
+    def __init__(self):
+        self._controller: DetectionController | None = None
+
+    def _get(self) -> DetectionController:
+        if self._controller is None:
+            self._controller = DetectionController()
+        return self._controller
+
+    def __getattr__(self, name: str):
+        return getattr(self._get(), name)
 
 
 # Setup CORS (ให้ Next.js เรียกได้)
@@ -85,10 +105,13 @@ app.include_router(dashboard_api_router, prefix="/api/dashboard", tags=["Dashboa
 # 8. Video Queue API (Multi-video processing with queue management)
 app.include_router(video_queue_router, tags=["Video Queue"])
 
+# 9. JSON Storage API (file-backed result mode)
+app.include_router(json_controller_router)
+
 # 2. ลงทะเบียน Router เดิม (Search, Stats, etc.)
 # (สมมติว่าคุณแยก route ของ detection ไว้ในไฟล์อื่นก็ include มาแบบเดียวกัน)
 # แต่ถ้าเขียนรวมใน main ก็เขียนต่อได้เลย เช่น:
-controller = DetectionController()
+controller = LazyDetectionController()
 
 # --- กลุ่มข้อมูลดิบ (Data List) ---
 @app.get("/api/detections", response_model=List[DetectionResponse])

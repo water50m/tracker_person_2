@@ -421,6 +421,7 @@ class VideoProcessor:
             byte_id=byte_id,
             person_crop=person_crop,
             embedder=embedder,
+            precomputed_embedding=person.embedding,
         )
         
         # Update person track_id to our persistent ID
@@ -433,9 +434,9 @@ class VideoProcessor:
                 detailed_colors = analyze_detailed_colors(person_crop)
                 color_groups = get_color_groups(detailed_colors)
                 
-                embedding = None
+                embedding = person.embedding.tolist() if person.embedding is not None else None
                 clothes = []
-                if embedder is not None:
+                if embedding is None and embedder is not None:
                     emb, cloth_names = embedder.get_embedding(person_crop)
                     embedding = emb.tolist() if emb is not None else None
                     clothes = cloth_names if cloth_names else []

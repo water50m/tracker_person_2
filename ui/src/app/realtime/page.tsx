@@ -1,7 +1,7 @@
 import RealtimeTab from "@/components/realtime/RealtimeTab";
 
 export const metadata = {
-  title: "NEXUS-EYE // Realtime Analysis",
+  title: "NEXUS-EYE // Video Processing",
 };
 
 export default function RealtimePage() {
@@ -11,14 +11,14 @@ export default function RealtimePage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="font-orbitron text-xl font-bold text-red-400 tracking-[0.2em] uppercase">
-            REALTIME ANALYSIS
+            VIDEO PROCESSING
           </h1>
           <p className="font-mono text-[10px] text-slate-500 mt-0.5 tracking-widest">
-            LIVE AI-POWERED VIDEO STREAM PROCESSING
+            VIDEO · YOUTUBE · IPCAM · WEBCAM PROCESSING
           </p>
         </div>
         <div className="font-mono text-[10px] text-slate-600 border border-slate-800 px-3 py-1 rounded-sm">
-          MODE: <span className="text-red-400">LIVE STREAM</span>
+          MODE: <span className="text-red-400">MULTI-SOURCE</span>
         </div>
       </div>
 

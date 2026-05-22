@@ -104,6 +104,27 @@ export default function RealtimeTab() {
   const cameraDropdownRef = useRef<HTMLDivElement>(null);
 
   const backendUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  const [storageMode, setStorageMode] = useState<"db" | "json">("db");
+  const isJsonMode = storageMode === "json";
+  const queueBase = isJsonMode ? `${backendUrl}/api/json/queue` : `${backendUrl}/api/video-queue`;
+
+  useEffect(() => {
+    const fetchStorageMode = async () => {
+      try {
+        const response = await fetch(`${backendUrl}/api/json/status`);
+        if (response.ok) {
+          const data = await response.json();
+          setStorageMode(data.storage_mode === "json" ? "json" : "db");
+          if (data.storage_mode === "json") {
+            setSaveToDatabase(false);
+          }
+        }
+      } catch (err) {
+        console.error("[Realtime] Failed to fetch storage mode:", err);
+      }
+    };
+    fetchStorageMode();
+  }, [backendUrl]);
 
   // Fetch cameras on mount
   useEffect(() => {
@@ -211,8 +232,10 @@ export default function RealtimeTab() {
   // Queue Management Functions
   const fetchQueueStatus = async () => {
     try {
-      // Use /db-status to get data from database (includes all persisted jobs)
-      const response = await fetch(`${backendUrl}/api/video-queue/db-status`);
+      const statusUrl = isJsonMode
+        ? `${queueBase}/status`
+        : `${queueBase}/db-status`;
+      const response = await fetch(statusUrl);
       if (response.ok) {
         const status = await response.json();
         console.log('[Queue] API response:', status);
@@ -236,7 +259,7 @@ export default function RealtimeTab() {
     }, intervalMs);
 
     return () => clearInterval(pollInterval);
-  }, [backendUrl, queueStatus?.current_job?.id]);
+  }, [backendUrl, queueBase, isJsonMode, queueStatus?.current_job?.id]);
 
   const addToQueue = async () => {
     if (selectedFiles.length === 0 && !videoPath.trim()) {
@@ -256,12 +279,12 @@ export default function RealtimeTab() {
           formData.append("camera_id", cameraId || "UNKNOWN");
           formData.append("display_mode", "background");
           formData.append("priority", queuePriority.toString());
-          formData.append("save_to_db", "true");
-          formData.append("save_images", "true");
-          formData.append("save_bbox_images", "true");
+          formData.append("save_to_db", isJsonMode ? "false" : "true");
+          formData.append("save_images", isJsonMode ? String(saveImages) : "true");
+          formData.append("save_bbox_images", isJsonMode ? String(saveBboxImages) : "true");
           formData.append("frame_skip", "5");
 
-          const response = await fetch(`${backendUrl}/api/video-queue/upload-add`, {
+          const response = await fetch(`${queueBase}/upload-add`, {
             method: "POST",
             body: formData,
           });
@@ -280,7 +303,7 @@ export default function RealtimeTab() {
           priority: queuePriority,
         };
 
-        const response = await fetch(`${backendUrl}/api/video-queue/add`, {
+        const response = await fetch(`${queueBase}/add`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -311,7 +334,7 @@ export default function RealtimeTab() {
     setPendingActions(prev => ({ ...prev, [jobId]: 'remove' }));
 
     try {
-      const response = await fetch(`${backendUrl}/api/video-queue/remove/${jobId}`, {
+      const response = await fetch(`${queueBase}/remove/${jobId}`, {
         method: "DELETE",
       });
 
@@ -335,7 +358,7 @@ export default function RealtimeTab() {
     setPendingActions(prev => ({ ...prev, [jobId]: 'pause' }));
 
     try {
-      const response = await fetch(`${backendUrl}/api/video-queue/pause`, {
+      const response = await fetch(`${queueBase}/pause`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobId }),
@@ -362,7 +385,7 @@ export default function RealtimeTab() {
     setPendingActions(prev => ({ ...prev, [jobId]: 'resume' }));
 
     try {
-      const response = await fetch(`${backendUrl}/api/video-queue/resume`, {
+      const response = await fetch(`${queueBase}/resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobId }),
@@ -388,7 +411,7 @@ export default function RealtimeTab() {
     setPendingActions(prev => ({ ...prev, [jobId]: 'stop' }));
 
     try {
-      const response = await fetch(`${backendUrl}/api/video-queue/stop`, {
+      const response = await fetch(`${queueBase}/stop`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobId }),
@@ -412,7 +435,7 @@ export default function RealtimeTab() {
 
   const reorderQueue = async (jobId: string, newPosition: number) => {
     try {
-      const response = await fetch(`${backendUrl}/api/video-queue/reorder`, {
+      const response = await fetch(`${queueBase}/reorder`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobId, new_position: newPosition }),
@@ -428,7 +451,7 @@ export default function RealtimeTab() {
 
   const clearCompleted = async () => {
     try {
-      const response = await fetch(`${backendUrl}/api/video-queue/clear-completed`, {
+      const response = await fetch(`${queueBase}/clear-completed`, {
         method: "DELETE",
       });
 
@@ -444,7 +467,7 @@ export default function RealtimeTab() {
     setPendingActions(prev => ({ ...prev, [jobId]: 'start_now' }));
 
     try {
-      const response = await fetch(`${backendUrl}/api/video-queue/start-immediately`, {
+      const response = await fetch(`${queueBase}/start-immediately`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobId }),
@@ -470,7 +493,7 @@ export default function RealtimeTab() {
     setPendingActions(prev => ({ ...prev, [jobId]: 'cancel' }));
 
     try {
-      const response = await fetch(`${backendUrl}/api/video-queue/cancel-and-remove`, {
+      const response = await fetch(`${queueBase}/cancel-and-remove`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobId }),
@@ -497,7 +520,7 @@ export default function RealtimeTab() {
     setPendingActions(prev => ({ ...prev, [jobId]: 'reprocess' }));
 
     try {
-      const response = await fetch(`${backendUrl}/api/video-queue/reprocess`, {
+      const response = await fetch(`${queueBase}/reprocess`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobId, start_immediately: startImmediately }),
@@ -523,7 +546,7 @@ export default function RealtimeTab() {
     setPendingActions(prev => ({ ...prev, [jobId]: 'resume_replace' }));
 
     try {
-      const response = await fetch(`${backendUrl}/api/video-queue/resume-and-replace`, {
+      const response = await fetch(`${queueBase}/resume-and-replace`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobId }),
@@ -779,6 +802,33 @@ export default function RealtimeTab() {
       } else {
         // Background mode
         try {
+          if (isJsonMode) {
+            const response = await fetch(`${queueBase}/add`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                source: resolvedUrl,
+                camera_id: cameraId.trim() || "UNKNOWN",
+                display_mode: "background",
+                priority: queuePriority,
+                frame_skip: 5,
+                save_images: saveImages,
+                save_bbox_images: saveBboxImages,
+              }),
+            });
+
+            if (!response.ok) {
+              const errorText = await response.text();
+              throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+
+            setActiveTab("queue");
+            setIsStreaming(false);
+            setError(null);
+            await fetchQueueStatus();
+            return;
+          }
+
           const response = await fetch(`${backendUrl}/api/video/analyze-background`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -786,7 +836,7 @@ export default function RealtimeTab() {
               video_path: resolvedUrl,
               camera_id: cameraId.trim() || undefined,
               frame_skip: 5,
-              save_to_db: true, // Always save to DB in background mode
+              save_to_db: true,
               save_images: saveImages,
               save_bbox_images: saveBboxImages,
             }),
@@ -933,8 +983,7 @@ export default function RealtimeTab() {
               active={displayMode === "background"}
               onClick={() => {
                 setDisplayMode("background");
-                // Auto-enable save to database when background mode is selected
-                if (!saveToDatabase) setSaveToDatabase(true);
+                setSaveToDatabase(!isJsonMode);
               }}
               label="⚡ BACKGROUND"
             />
@@ -944,6 +993,8 @@ export default function RealtimeTab() {
               ? "Stream to web browser"
               : displayMode === "cv2"
               ? "Open separate window on server (requires GUI)"
+              : isJsonMode
+              ? "Process silently, save JSON results locally"
               : "Process silently, save to database only"}
           </p>
 

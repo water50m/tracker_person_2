@@ -58,12 +58,18 @@ class SystemUpdate(BaseModel):
     batch_size: int | None = None
     num_workers: int | None = None
 
+class StorageUpdate(BaseModel):
+    mode: str | None = None
+    json_root: str | None = None
+    json_index: str | None = None
+
 class SettingsUpdate(BaseModel):
     paths: PathsUpdate | None = None
     models: ModelsUpdate | None = None
     detection: DetectionUpdate | None = None
     tracking: TrackingUpdate | None = None
     system: SystemUpdate | None = None
+    storage: StorageUpdate | None = None
 
 
 # ─── Endpoints ───────────────────────────────────────────────
@@ -114,11 +120,20 @@ async def update_settings(body: SettingsUpdate):
     """Partial-update system configuration."""
     cfg = load_config()
     update = body.model_dump(exclude_none=True)
+
+    storage_update = update.get("storage")
+    if storage_update and "mode" in storage_update:
+        mode = str(storage_update["mode"]).lower()
+        if mode not in {"db", "json"}:
+            raise HTTPException(status_code=400, detail="storage.mode must be 'db' or 'json'")
+        storage_update["mode"] = mode
     
     # Apply nested updates
     for section, values in update.items():
         if section in cfg and isinstance(cfg[section], dict) and values:
             cfg[section].update(values)
+        elif section == "storage" and values:
+            cfg[section] = values
     
     save_config(cfg)
     return {"status": "saved", "config": cfg}
