@@ -1,6 +1,6 @@
 import os
 import json
-import torch
+import time
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel
@@ -8,15 +8,12 @@ from src.config_loader import load_config as load_global_config, reload_config
 
 router = APIRouter()
 
-# ─── Cache CUDA info once at startup (torch init is slow) ─────
-_CUDA_AVAILABLE: bool = torch.cuda.is_available()
-_DEVICE_NAME: str    = torch.cuda.get_device_name(0) if _CUDA_AVAILABLE else "CPU"
-_GPU_COUNT: int      = torch.cuda.device_count()    if _CUDA_AVAILABLE else 0
-
-
 # Paths
 MODELS_DIR = Path("models")
 CONFIG_PATH = Path("config/system_settings.json")
+_MODELS_CACHE: dict | None = None
+_MODELS_CACHE_TIME = 0.0
+_MODELS_CACHE_TTL_SEC = 10.0
 
 # ─── Config loader (uses global config_loader module) ──────────
 def load_config() -> dict:
@@ -77,39 +74,44 @@ class SettingsUpdate(BaseModel):
 @router.get("/settings")
 async def get_settings():
     """Return current system configuration + hardware info."""
+    start = time.perf_counter()
     cfg = load_config()
 
-    cuda_available = _CUDA_AVAILABLE
-    device_name    = _DEVICE_NAME
-    gpu_count      = _GPU_COUNT
+    configured_device = str(cfg.get("system", {}).get("device", "cpu")).lower()
+    cuda_configured = configured_device == "cuda"
 
     detector_path = Path(cfg["models"]["detector_model"])
     classifier_path = Path(cfg["models"]["classifier_model"])
     reid_path = Path(cfg["models"]["reid_model_path"])
+    detector_exists = detector_path.exists()
+    classifier_exists = classifier_path.exists()
+    reid_exists = reid_path.exists()
+    duration_ms = (time.perf_counter() - start) * 1000
+    print(f"[SETTINGS-TIME] GET /settings config+stat={duration_ms:.1f}ms", flush=True)
 
     return {
         "config": cfg,
         "hardware": {
-            "device": "cuda" if cuda_available else "cpu",
-            "device_name": device_name,
-            "gpu_count": gpu_count,
-            "cuda_available": cuda_available,
+            "device": "cuda" if cuda_configured else "cpu",
+            "device_name": "CUDA (configured)" if cuda_configured else "CPU",
+            "gpu_count": 1 if cuda_configured else 0,
+            "cuda_available": cuda_configured,
         },
         "models": {
             "detector": {
                 "path": str(detector_path),
-                "exists": detector_path.exists(),
-                "size_mb": round(detector_path.stat().st_size / 1_048_576, 1) if detector_path.exists() else None,
+                "exists": detector_exists,
+                "size_mb": round(detector_path.stat().st_size / 1_048_576, 1) if detector_exists else None,
             },
             "classifier": {
                 "path": str(classifier_path),
-                "exists": classifier_path.exists(),
-                "size_mb": round(classifier_path.stat().st_size / 1_048_576, 1) if classifier_path.exists() else None,
+                "exists": classifier_exists,
+                "size_mb": round(classifier_path.stat().st_size / 1_048_576, 1) if classifier_exists else None,
             },
             "reid": {
                 "path": str(reid_path),
-                "exists": reid_path.exists(),
-                "size_mb": round(reid_path.stat().st_size / 1_048_576, 1) if reid_path.exists() else None,
+                "exists": reid_exists,
+                "size_mb": round(reid_path.stat().st_size / 1_048_576, 1) if reid_exists else None,
             },
         },
     }
@@ -146,6 +148,12 @@ async def update_settings(body: SettingsUpdate):
 @router.get("/settings/models")
 async def list_models():
     """List all .pt model files in the root and models/ directory."""
+    global _MODELS_CACHE, _MODELS_CACHE_TIME
+    start = time.perf_counter()
+    if _MODELS_CACHE and time.time() - _MODELS_CACHE_TIME < _MODELS_CACHE_TTL_SEC:
+        print("[SETTINGS-TIME] GET /settings/models cache=hit duration=0.0ms", flush=True)
+        return _MODELS_CACHE
+
     files = []
     search_dirs = [MODELS_DIR, Path(".")]  # models/ first, root as fallback
     for d in search_dirs:
@@ -163,12 +171,17 @@ async def list_models():
         if f["path"] not in seen:
             seen.add(f["path"])
             unique.append(f)
-    return {"models": unique}
+    _MODELS_CACHE = {"models": unique}
+    _MODELS_CACHE_TIME = time.time()
+    duration_ms = (time.perf_counter() - start) * 1000
+    print(f"[SETTINGS-TIME] GET /settings/models cache=miss files={len(unique)} duration={duration_ms:.1f}ms", flush=True)
+    return _MODELS_CACHE
 
 
 @router.post("/settings/models/upload")
 async def upload_model(file: UploadFile = File(...)):
     """Upload a new .pt model file to the models/ directory."""
+    global _MODELS_CACHE, _MODELS_CACHE_TIME
     if not file.filename or not file.filename.endswith(".pt"):
         raise HTTPException(status_code=400, detail="Only .pt model files are accepted")
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -176,6 +189,8 @@ async def upload_model(file: UploadFile = File(...)):
     try:
         contents = await file.read()
         dest.write_bytes(contents)
+        _MODELS_CACHE = None
+        _MODELS_CACHE_TIME = 0.0
         size_mb = round(dest.stat().st_size / 1_048_576, 1)
         return {"status": "uploaded", "name": file.filename, "path": str(dest), "size_mb": size_mb}
     except Exception as e:

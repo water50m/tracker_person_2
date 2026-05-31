@@ -24,6 +24,7 @@ from services.video_queue_service import (
     JobStatus
 )
 from services.database import DatabaseService
+from config_loader import get_storage_mode
 
 router = APIRouter(prefix="/api/video-queue", tags=["Video Queue"])
 
@@ -262,6 +263,25 @@ async def get_db_status():
     This includes all persisted jobs, not just current in-memory state.
     """
     try:
+        if get_storage_mode() == "json":
+            return GlobalStatusResponse(
+                current_job=None,
+                queue=[],
+                paused=[],
+                completed=[],
+                failed=[],
+                stopped=[],
+                stats={
+                    "total_jobs": 0,
+                    "pending_count": 0,
+                    "processing_count": 0,
+                    "paused_count": 0,
+                    "completed_count": 0,
+                    "failed_count": 0,
+                    "stopped_count": 0,
+                },
+            )
+
         db = DatabaseService()
 
         with db.conn.cursor() as cur:
@@ -616,6 +636,9 @@ async def get_processing_history(limit: int = 50):
     This includes jobs that may have been persisted across server restarts.
     """
     try:
+        if get_storage_mode() == "json":
+            return {"history": [], "count": 0, "storage_mode": "json"}
+
         db = DatabaseService()
         
         with db.conn.cursor() as cur:

@@ -28,12 +28,18 @@ interface DetectionCard {
 // ─── Utilities ────────────────────────────────────────────────
 
 function getYoutubeEmbedUrl(url: string): string | null {
-  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
-  const match = url.match(regExp);
-  if (match && match[2].length === 11) {
-    return `https://www.youtube.com/embed/${match[2]}?autoplay=1&mute=1&controls=0&modestbranding=1`;
-  }
-  return null;
+  const trimmed = (url || "").trim();
+  if (!trimmed) return null;
+
+  const idMatch =
+    trimmed.match(/(?:youtu\.be\/)([A-Za-z0-9_-]{11})/) ||
+    trimmed.match(/[?&]v=([A-Za-z0-9_-]{11})/) ||
+    trimmed.match(/\/shorts\/([A-Za-z0-9_-]{11})/) ||
+    trimmed.match(/\/embed\/([A-Za-z0-9_-]{11})/);
+
+  const videoId = idMatch?.[1];
+  if (!videoId) return null;
+  return `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&controls=0&modestbranding=1`;
 }
 
 function isIPCameraUrl(url: string): boolean {
@@ -430,6 +436,16 @@ export default function LiveVideoCanvas() {
 
                 // Check for IP camera URLs
                 if (isIPCameraUrl(selectedCamera.source_url)) {
+                  if (selectedCamera.source_url.toLowerCase().startsWith("rtsp://")) {
+                    return (
+                      <img
+                        key={`raw-${selectedCamera.id}-${streamKeyRef.current}`}
+                        src={`/api/dashboard/mjpeg/${selectedCamera.id}`}
+                        alt="RTSP relay stream"
+                        className="w-full h-full object-contain"
+                      />
+                    );
+                  }
                   return <IPCameraPlayer src={selectedCamera.source_url} className="w-full h-full" />;
                 }
 

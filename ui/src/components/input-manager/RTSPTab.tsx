@@ -1,17 +1,8 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { RTSPStream, RTSPTestResult } from "@/types";
 import { API } from "@/lib/api"; // FastAPI base URL จาก .env.local (NEXT_PUBLIC_API_URL)
-
-// ─── Mock seed streams ────────────────────────────────────────
-
-const SEED_STREAMS: RTSPStream[] = [
-  { camera_id: "CAM-01", rtsp_url: "rtsp://192.168.1.101:554/live", label: "Main Entrance", status: "live", resolution: "1920x1080", fps: 25 },
-  { camera_id: "CAM-02", rtsp_url: "rtsp://192.168.1.102:554/ch0", label: "Corridor B", status: "live", resolution: "1280x720", fps: 30 },
-  { camera_id: "CAM-03", rtsp_url: "rtsp://192.168.1.103:554/main", label: "Parking Lot", status: "offline", resolution: undefined, fps: undefined },
-  { camera_id: "CAM-04", rtsp_url: "rtsp://192.168.1.104:554/stream", label: "Exit Gate", status: "error", resolution: undefined, fps: undefined },
-];
 
 // ─── Helpers ─────────────────────────────────────────────────
 
@@ -33,10 +24,20 @@ function isValidRTSP(url: string) {
   return /^rtsp:\/\/.{3,}/.test(url.trim());
 }
 
+function isValidStreamSource(url: string) {
+  const u = url.trim().toLowerCase();
+  if (!u) return false;
+  if (u.startsWith("rtsp://")) return true;
+  if (u.startsWith("rtmp://")) return true;
+  if (u.startsWith("http://") || u.startsWith("https://")) return true;
+  return false;
+}
+
 // ─── Component ───────────────────────────────────────────────
 
 export default function RTSPTab() {
-  const [streams, setStreams] = useState<RTSPStream[]>(SEED_STREAMS);
+  const [streams, setStreams] = useState<RTSPStream[]>([]);
+  const [isLoadingStreams, setIsLoadingStreams] = useState(true);
   const [formUrl, setFormUrl] = useState("");
   const [formCamId, setFormCamId] = useState("");
   const [formLabel, setFormLabel] = useState("");
@@ -48,6 +49,35 @@ export default function RTSPTab() {
   const [activeStreams, setActiveStreams] = useState<string[]>([]);
   const [stoppingCams, setStoppingCams] = useState<Set<string>>(new Set());
   const addTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const loadStreams = useCallback(async () => {
+    setIsLoadingStreams(true);
+    try {
+      const response = await fetch("/api/input/rtsp-streams", { cache: "no-store" });
+      if (!response.ok) throw new Error("failed to load streams");
+      const data = await response.json();
+      const rows: Partial<RTSPStream>[] = Array.isArray(data.streams) ? data.streams : [];
+      const mapped: RTSPStream[] = rows
+        .map((row) => ({
+          camera_id: String(row.camera_id ?? ""),
+          rtsp_url: String(row.rtsp_url ?? ""),
+          label: row.label ?? row.camera_id,
+          status: "offline" as const,
+          resolution: row.resolution,
+          fps: row.fps,
+        }))
+        .filter((row) => row.camera_id && row.rtsp_url);
+      setStreams(mapped);
+    } catch {
+      setStreams([]);
+    } finally {
+      setIsLoadingStreams(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadStreams();
+  }, [loadStreams]);
 
   // ── Poll active AI streams every 5s ───────────────────────
   useEffect(() => {
@@ -63,26 +93,11 @@ export default function RTSPTab() {
     return () => clearInterval(t);
   }, []);
 
-  // ── Simulate periodic FPS jitter ──────────────────────────
-  useEffect(() => {
-    const t = setInterval(() => {
-      setStreams((prev) =>
-        prev.map((s) => {
-          if (s.status === "live" && Math.random() < 0.02) {
-            return { ...s, fps: Math.max(20, (s.fps ?? 25) + Math.floor((Math.random() - 0.5) * 4)) };
-          }
-          return s;
-        })
-      );
-    }, 3000);
-    return () => clearInterval(t);
-  }, []);
-
   // ── Test RTSP connection ───────────────────────────────────
   const handleTest = async () => {
     const url = formUrl.trim();
     if (!isValidRTSP(url)) {
-      setFormErrors((e) => ({ ...e, url: "Must start with rtsp://" }));
+      setFormErrors((e) => ({ ...e, url: "Test supports RTSP only (rtsp://...)" }));
       return;
     }
     setTestStatus("testing");
@@ -111,7 +126,7 @@ export default function RTSPTab() {
   // ── Add stream ─────────────────────────────────────────────
   const handleAdd = async () => {
     const errors: { url?: string; camId?: string } = {};
-    if (!isValidRTSP(formUrl)) errors.url = "Must start with rtsp://";
+    if (!isValidStreamSource(formUrl)) errors.url = "Enter a valid URL (rtsp/rtmp/http/https)";
     if (!formCamId.trim()) errors.camId = "Camera ID is required";
     if (Object.keys(errors).length) { setFormErrors(errors); return; }
 
@@ -123,14 +138,20 @@ export default function RTSPTab() {
     setAddStatus("adding");
 
     try {
-      await fetch("/api/input/rtsp-streams", {
+      const response = await fetch("/api/input/rtsp-streams", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rtsp_url: formUrl, camera_id: formCamId.trim().toUpperCase(), label: formLabel || formCamId }),
+        body: JSON.stringify({ source_url: formUrl, camera_id: formCamId.trim().toUpperCase(), label: formLabel || formCamId }),
       });
-    } catch { /* offline dev */ }
-
-    await new Promise((r) => setTimeout(r, 800));
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+    } catch {
+      setAddStatus("error");
+      if (addTimeoutRef.current) clearTimeout(addTimeoutRef.current);
+      addTimeoutRef.current = setTimeout(() => setAddStatus("idle"), 2500);
+      return;
+    }
 
     const newStream: RTSPStream = {
       camera_id: formCamId.trim().toUpperCase(),
@@ -154,8 +175,11 @@ export default function RTSPTab() {
   // ── Remove stream ──────────────────────────────────────────
   const handleRemove = async (camId: string) => {
     try {
-      await fetch(`/api/input/rtsp-streams?camera_id=${camId}`, { method: "DELETE" });
-    } catch { /* offline */ }
+      const response = await fetch(`/api/input/rtsp-streams?camera_id=${camId}`, { method: "DELETE" });
+      if (!response.ok) return;
+    } catch {
+      return;
+    }
     setStreams((prev) => prev.filter((s) => s.camera_id !== camId));
     if (selectedStream?.camera_id === camId) setSelectedStream(null);
   };
@@ -195,17 +219,17 @@ export default function RTSPTab() {
 
           {/* RTSP URL */}
           <FormField
-            label="RTSP URL"
+            label="STREAM URL"
             required
             error={formErrors.url}
-            hint="rtsp://user:pass@host:port/path"
+            hint="rtsp://, rtmp://, http(s)://, youtube URL"
           >
             <div className="flex gap-2">
               <input
                 type="text"
                 value={formUrl}
                 onChange={(e) => { setFormUrl(e.target.value); setFormErrors((x) => ({ ...x, url: undefined })); setTestStatus("idle"); setTestResult(null); }}
-                placeholder="rtsp://192.168.1.x:554/live"
+                placeholder="rtsp://... | https://youtube.com/watch?v=... | https://...m3u8"
                 className={`
                   flex-1 bg-slate-900/60 border rounded-sm px-3 py-1.5 font-mono text-[10px]
                   text-slate-300 placeholder-slate-700 outline-none tracking-wide transition-colors
@@ -219,7 +243,7 @@ export default function RTSPTab() {
           <div className="flex items-center gap-2">
             <button
               onClick={handleTest}
-              disabled={!formUrl || testStatus === "testing"}
+              disabled={!formUrl || testStatus === "testing" || !isValidRTSP(formUrl)}
               className={`
                 flex items-center gap-1.5 px-3 py-1.5 rounded-sm border font-mono text-[9px] tracking-wider
                 transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed
@@ -234,7 +258,7 @@ export default function RTSPTab() {
               ) : (
                 <><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-3 h-3">
                   <path d="M5 12.55a11 11 0 0114.08 0M1.42 9a16 16 0 0121.16 0M8.53 16.11a6 6 0 016.95 0M12 20h.01" />
-                </svg> TEST CONNECTION</>
+                </svg> TEST RTSP</>
               )}
             </button>
 
@@ -283,6 +307,8 @@ export default function RTSPTab() {
               disabled:cursor-wait
               ${addStatus === "done"
                 ? "border-green-700/60 bg-green-950/30 text-green-400"
+                : addStatus === "error"
+                  ? "border-red-700/60 bg-red-950/30 text-red-400"
                 : addStatus === "adding"
                   ? "border-yellow-800/60 bg-yellow-950/30 text-yellow-500"
                   : "border-yellow-600/60 bg-yellow-950/30 text-yellow-400 hover:bg-yellow-900/40 hover:border-yellow-500 shadow-[0_0_10px_rgba(255,215,0,0.1)] hover:shadow-[0_0_18px_rgba(255,215,0,0.2)]"
@@ -291,6 +317,8 @@ export default function RTSPTab() {
           >
             {addStatus === "done" ? (
               <><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} className="w-3.5 h-3.5"><path d="M20 6L9 17l-5-5" /></svg> ADDED</>
+            ) : addStatus === "error" ? (
+              <><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} className="w-3.5 h-3.5"><path d="M12 8v4m0 4h.01M10.29 3.86l-7.8 13.5A1 1 0 003.37 19h17.26a1 1 0 00.87-1.64l-7.8-13.5a1 1 0 00-1.73 0z" /></svg> ADD FAILED</>
             ) : addStatus === "adding" ? (
               <><PingAnimation /> CONNECTING...</>
             ) : (
@@ -305,7 +333,9 @@ export default function RTSPTab() {
           {[
             { label: "Hikvision", url: "rtsp://admin:pass@ip:554/h264/ch1/main/av_stream" },
             { label: "Dahua", url: "rtsp://admin:pass@ip:554/cam/realmonitor?channel=1" },
-            { label: "Generic", url: "rtsp://user:pass@host:554/live" },
+            { label: "YouTube", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
+            { label: "HLS", url: "https://example.com/live/stream.m3u8" },
+            { label: "RTMP", url: "rtmp://example.com/live/cam01" },
           ].map(({ label, url }) => (
             <button
               key={label}
@@ -333,7 +363,10 @@ export default function RTSPTab() {
             </div>
             <span className="font-mono text-[10px] text-slate-600">/ {streams.length} TOTAL</span>
           </div>
-          <button className="font-mono text-[8px] text-slate-600 hover:text-slate-400 transition-colors">
+          <button
+            onClick={() => void loadStreams()}
+            className="font-mono text-[8px] text-slate-600 hover:text-slate-400 transition-colors"
+          >
             REFRESH ALL
           </button>
         </div>
@@ -348,7 +381,11 @@ export default function RTSPTab() {
 
         {/* Rows */}
         <div className="flex-1 overflow-y-auto min-h-0 divide-y divide-slate-800/30">
-          {streams.length === 0 ? (
+          {isLoadingStreams ? (
+            <div className="h-full flex items-center justify-center py-12">
+              <p className="font-mono text-[9px] text-slate-600 tracking-widest">LOADING STREAMS...</p>
+            </div>
+          ) : streams.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center gap-3 py-12">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1} className="w-10 h-10 text-slate-800">
                 <path d="M15 10l4.553-2.277A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />

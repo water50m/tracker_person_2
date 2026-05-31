@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 
 /**
- * GET  /api/input/rtsp-streams  → list all streams
- * POST /api/input/rtsp-streams  → add new stream
+ * GET  /api/input/rtsp-streams  → list all stream sources
+ * POST /api/input/rtsp-streams  → add new stream source
  */
 export async function GET() {
   try {
     const backendUrl = process.env.AI_BACKEND_URL ?? "http://localhost:8000";
-    const res = await fetch(`${backendUrl}/api/streams`, {
+    const res = await fetch(`${backendUrl}/api/dashboard/streams`, {
       next: { revalidate: 10 },
     });
 
@@ -23,12 +23,13 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { rtsp_url, camera_id, label } = body;
+    const { rtsp_url, source_url, camera_id, label } = body;
+    const streamUrl: string = String(rtsp_url ?? source_url ?? "").trim();
 
     // Validate
-    if (!rtsp_url || !rtsp_url.startsWith("rtsp://")) {
+    if (!streamUrl) {
       return NextResponse.json(
-        { error: "Invalid RTSP URL. Must start with rtsp://" },
+        { error: "source_url is required" },
         { status: 400 }
       );
     }
@@ -42,10 +43,10 @@ export async function POST(request: NextRequest) {
 
     const backendUrl = process.env.AI_BACKEND_URL ?? "http://localhost:8000";
 
-    const res = await fetch(`${backendUrl}/api/streams`, {
+    const res = await fetch(`${backendUrl}/api/dashboard/streams`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ rtsp_url, camera_id, label: label ?? camera_id }),
+      body: JSON.stringify({ source_url: streamUrl, camera_id, label: label ?? camera_id }),
     });
 
     if (!res.ok) {
@@ -78,7 +79,7 @@ export async function DELETE(request: NextRequest) {
   try {
     const backendUrl = process.env.AI_BACKEND_URL ?? "http://localhost:8000";
     const res = await fetch(
-      `${backendUrl}/api/streams/${encodeURIComponent(cameraId)}`,
+      `${backendUrl}/api/dashboard/streams/${encodeURIComponent(cameraId)}`,
       { method: "DELETE" }
     );
 

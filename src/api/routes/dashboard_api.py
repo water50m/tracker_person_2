@@ -7,19 +7,21 @@ Dashboard API
 
 from __future__ import annotations
 
-import cv2
 import os
 import asyncio
 import sys
 import time
+import json
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from src.services.database import DatabaseService
 from src.services.stream_manager import stream_manager
+from src.config_loader import get_storage_mode
 from src.api.video_controller import (
     _ACTIVE_STREAMS, YOUTUBE_PATTERN, _extract_youtube_stream,
     _register_stream, _unregister_stream
@@ -67,6 +69,8 @@ async def _process_stream_refactored(
 
         def on_frame(frame, frame_number):
             """Callback for MJPEG relay frame cache."""
+            import cv2
+
             ok, jpeg = cv2.imencode(".jpg", frame)
             if ok:
                 stream_manager.update_frame(camera_id, jpeg.tobytes(), frame_number)
@@ -101,12 +105,84 @@ router = APIRouter()
 
 MINIO_BASE = os.getenv("MINIO_BASE_URL", "http://myserver:9000")
 print(f"[DEBUG] MINIO_BASE_URL forced to: {MINIO_BASE}")
+
+
+class StreamUpsertRequest(BaseModel):
+    rtsp_url: str | None = None
+    source_url: str | None = None
+    camera_id: str
+    label: str | None = None
+    is_active: bool = True
+
+
+def _json_streams_path() -> Path:
+    from src.config_loader import get_json_storage_root
+
+    root = Path(get_json_storage_root()).resolve()
+    streams_path = (root / "json_jobs" / "streams.json").resolve()
+    streams_path.parent.mkdir(parents=True, exist_ok=True)
+    return streams_path
+
+
+def _load_json_streams() -> list[dict]:
+    path = _json_streams_path()
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        streams = payload.get("streams", [])
+    else:
+        streams = payload
+    if not isinstance(streams, list):
+        return []
+    cleaned = []
+    for row in streams:
+        if not isinstance(row, dict):
+            continue
+        camera_id = str(row.get("camera_id") or "").strip()
+        if not camera_id:
+            continue
+        cleaned.append(
+            {
+                "camera_id": camera_id,
+                "rtsp_url": str(row.get("rtsp_url") or row.get("source_url") or "").strip(),
+                "label": str(row.get("label") or camera_id),
+                "is_active": bool(row.get("is_active", True)),
+            }
+        )
+    return cleaned
+
+
+def _save_json_streams(streams: list[dict]) -> None:
+    path = _json_streams_path()
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"streams": streams}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
 # ─── Cameras ──────────────────────────────────────────────────────────────────
 
 @router.get("/cameras")
 async def list_dashboard_cameras():
     """Return all cameras from DB merged with active-stream registry."""
     try:
+        if get_storage_mode() == "json":
+            cameras = []
+            for stream in _load_json_streams():
+                cam_id = stream["camera_id"]
+                cameras.append(
+                    {
+                        "id": cam_id,
+                        "name": stream.get("label") or cam_id,
+                        "source_url": stream.get("rtsp_url") or "",
+                        "is_active": stream.get("is_active", True),
+                        "is_processing": cam_id in _ACTIVE_STREAMS,
+                        "is_prediction_paused": False,
+                    }
+                )
+            return {"cameras": cameras, "storage_mode": "json"}
+
         db = DatabaseService()
         with db.conn.cursor() as cur:
             cur.execute("SELECT id, name, source_url, is_active FROM cameras ORDER BY id")
@@ -133,6 +209,9 @@ async def list_dashboard_cameras():
 async def latest_detections(camera_id: str, limit: int = Query(8, ge=1, le=50)):
     """Return the most recent N detections for a given camera_id."""
     try:
+        if get_storage_mode() == "json":
+            return {"camera_id": camera_id, "detections": [], "storage_mode": "json"}
+
         db = DatabaseService()
         with db.conn.cursor() as cur:
             cur.execute(
@@ -173,6 +252,13 @@ _MJPEG_CACHE: dict[str, str] = {}   # camera_id → rtsp_url (cached from DB)
 
 def _get_rtsp_url(camera_id: str) -> str | None:
     """Look up the RTSP stream URL for a camera_id from the DB (or int for webcam)."""
+    if get_storage_mode() == "json":
+        for stream in _load_json_streams():
+            if stream["camera_id"] == camera_id:
+                url = stream.get("rtsp_url") or ""
+                return url or None
+        return None
+
     try:
         db = DatabaseService()
         db._ensure_connection()
@@ -278,9 +364,33 @@ async def _mjpeg_generator(source: str, camera_id: str) -> AsyncGenerator[bytes,
         print(f"[MJPEG] Stream ended for camera {camera_id}, total frames: {frame_count}")
         return  # Exit when AI processing stops
                 
-    # If not active, do not occupy the server. The frontend handles native playback.
-    print(f"[MJPEG] Camera {camera_id} not in active streams, not streaming")
-    return
+    # Inactive camera: relay raw stream without AI processing.
+    import cv2
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        print(f"[MJPEG] Cannot open raw source for camera {camera_id}: {source}")
+        return
+    print(f"[MJPEG] Raw relay started for camera {camera_id}")
+    try:
+        while True:
+            ok, frame = await loop.run_in_executor(None, cap.read)
+            if not ok:
+                await asyncio.sleep(0.05)
+                continue
+            ok_enc, jpeg = cv2.imencode(".jpg", frame)
+            if not ok_enc:
+                await asyncio.sleep(0.01)
+                continue
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n"
+                + jpeg.tobytes()
+                + b"\r\n"
+            )
+            await asyncio.sleep(1 / 15)
+    finally:
+        cap.release()
+        print(f"[MJPEG] Raw relay stopped for camera {camera_id}")
 
 
 
@@ -394,3 +504,92 @@ async def start_prediction(camera_id: str, background_tasks: BackgroundTasks, re
 async def live_data(camera_id: str):
     """Returns the absolute newest detection box data from the stream manager (memory), for frontend clickable boxes."""
     return {"camera_id": camera_id, "detections": stream_manager.get_detections(camera_id)}
+
+
+@router.get("/streams")
+async def list_streams():
+    if get_storage_mode() == "json":
+        return {"streams": _load_json_streams(), "storage_mode": "json"}
+    db = DatabaseService()
+    with db.conn.cursor() as cur:
+        cur.execute("SELECT id, name, source_url, is_active FROM cameras ORDER BY id")
+        rows = cur.fetchall()
+    streams = [
+        {
+            "camera_id": str(row[0]),
+            "label": row[1],
+            "rtsp_url": row[2],
+            "is_active": bool(row[3]),
+        }
+        for row in rows
+    ]
+    return {"streams": streams, "storage_mode": "db"}
+
+
+@router.post("/streams")
+async def upsert_stream(payload: StreamUpsertRequest):
+    stream_url = (payload.rtsp_url or payload.source_url or "").strip()
+    camera_id = payload.camera_id.strip()
+    if not stream_url:
+        raise HTTPException(status_code=400, detail="source_url (or rtsp_url) is required")
+    if not camera_id:
+        raise HTTPException(status_code=400, detail="camera_id is required")
+    label = (payload.label or camera_id).strip() or camera_id
+
+    if get_storage_mode() == "json":
+        streams = _load_json_streams()
+        updated = False
+        for item in streams:
+            if item["camera_id"] == camera_id:
+                item["rtsp_url"] = stream_url
+                item["label"] = label
+                item["is_active"] = bool(payload.is_active)
+                updated = True
+                break
+        if not updated:
+            streams.append(
+                {
+                    "camera_id": camera_id,
+                    "rtsp_url": stream_url,
+                    "label": label,
+                    "is_active": bool(payload.is_active),
+                }
+            )
+        _save_json_streams(streams)
+        return {"status": "saved", "camera_id": camera_id, "storage_mode": "json"}
+
+    db = DatabaseService()
+    with db.conn.cursor() as cur:
+        cur.execute("SELECT id FROM cameras WHERE id::text = %s OR name = %s LIMIT 1", (camera_id, camera_id))
+        row = cur.fetchone()
+        if row is not None:
+            cur.execute(
+                "UPDATE cameras SET name=%s, source_url=%s, is_active=%s WHERE id=%s",
+                (label, stream_url, bool(payload.is_active), row[0]),
+            )
+        else:
+            cur.execute(
+                "INSERT INTO cameras (name, source_url, is_active) VALUES (%s, %s, %s)",
+                (label, stream_url, bool(payload.is_active)),
+            )
+    db.conn.commit()
+    return {"status": "saved", "camera_id": camera_id, "storage_mode": "db"}
+
+
+@router.delete("/streams/{camera_id}")
+async def delete_stream(camera_id: str):
+    camera_id = camera_id.strip()
+    if not camera_id:
+        raise HTTPException(status_code=400, detail="camera_id is required")
+    if get_storage_mode() == "json":
+        streams = [item for item in _load_json_streams() if item["camera_id"] != camera_id]
+        _save_json_streams(streams)
+        return {"status": "deleted", "camera_id": camera_id, "storage_mode": "json"}
+    db = DatabaseService()
+    with db.conn.cursor() as cur:
+        cur.execute("DELETE FROM cameras WHERE id::text = %s OR name = %s", (camera_id, camera_id))
+        deleted = cur.rowcount
+    db.conn.commit()
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail=f"Camera not found: {camera_id}")
+    return {"status": "deleted", "camera_id": camera_id, "storage_mode": "db"}

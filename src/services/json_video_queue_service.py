@@ -123,8 +123,8 @@ class JsonVideoQueueService:
             fps=fps,
             duration_sec=duration_sec,
             frame_skip=frame_skip,
-            save_images=save_images,
-            save_bbox_images=save_bbox_images,
+            save_images=False,
+            save_bbox_images=False,
             output_dir=job_id,
         )
         async with self._lock:
@@ -367,6 +367,9 @@ class JsonVideoQueueService:
             "--json-index",
             str(Path(get_json_storage_index()).resolve()),
             "--json-only-output",
+            "--save-json-id-images",
+            "--json-id-image-lost-timeout-frames",
+            "30",
             "--camera-id",
             job.camera_id,
             "--db-video-label",
@@ -374,9 +377,6 @@ class JsonVideoQueueService:
             "--frame-stride",
             str(max(1, job.frame_skip)),
         ]
-        if job.save_images:
-            command.append("--save-local-images")
-
         stdout_handle = Path(job.stdout_log).open("w", encoding="utf-8")
         stderr_handle = Path(job.stderr_log).open("w", encoding="utf-8")
         try:

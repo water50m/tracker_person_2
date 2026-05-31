@@ -1,5 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 import asyncio
 import shutil
 import os
@@ -11,14 +11,15 @@ from pathlib import Path
 from typing import Optional, List, AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from src.services.database import DatabaseService
-from src.services.storage import StorageService
 from src.api.schemas import DetectionResponse
 from src.config_loader import get_storage_mode
 from src.services.clothing_postprocess import FinalOutfitVoter, StableClothingVoter, select_clothing_items
-import yt_dlp
 
 # Add src to path for Feature Flag and VideoProcessor
 sys.path.insert(0, str(Path(__file__).parent.parent))
+WORKSPACE = Path(__file__).resolve().parents[2]
+os.environ.setdefault("YOLO_CONFIG_DIR", str(WORKSPACE / ".ultralytics"))
+os.environ.setdefault("MPLCONFIGDIR", str(WORKSPACE / ".matplotlib"))
 
 # Refactored VideoProcessor (lazy import to avoid loading if not used)
 _video_processor = None
@@ -258,6 +259,8 @@ async def upload_video(
 
 ):
     try:
+        if get_storage_mode() == "json":
+            raise HTTPException(status_code=409, detail="Use /api/json/queue/upload-add in JSON storage mode")
 
         # 1. บันทึกไฟล์ลง Disk ก่อน
         file_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{camera_id}_{file.filename}"))
@@ -341,6 +344,9 @@ async def upload_video_stream(
     real-time detection with bounding boxes overlay.
     """
     try:
+        if get_storage_mode() == "json":
+            raise HTTPException(status_code=409, detail="Use JSON queue or realtime temp upload in JSON storage mode")
+
         # 1. Save uploaded file
         file_path = os.path.abspath(os.path.join(UPLOAD_DIR, f"{camera_id}_{file.filename}"))
         
@@ -463,6 +469,8 @@ YOUTUBE_PATTERN = re.compile(
 
 def _extract_youtube_stream(url: str) -> dict:
     """Use yt-dlp to get the best direct video stream URL (no downloads)."""
+    import yt_dlp
+
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -539,6 +547,9 @@ async def analyze_youtube(
     frame_skip: int = Form(30),
 ):
     """Download + analyse a YouTube video via yt-dlp, or accept raw m3u8 stream. (Registers ONLY)."""
+    if get_storage_mode() == "json":
+        raise HTTPException(status_code=409, detail="Use /api/json/queue/add in JSON storage mode")
+
     
     is_raw_stream = ".m3u8" in youtube_url or ".mp4" in youtube_url
     
@@ -610,6 +621,8 @@ async def clear_data(type: str = "all", delete_img: bool = False):
     import time
     start_time = time.time()
     print(f"[/api/video/clear] Request started: type={type}, delete_img={delete_img}")
+    if get_storage_mode() == "json":
+        raise HTTPException(status_code=409, detail="Database/MinIO clear is disabled in JSON storage mode")
     
     db = DatabaseService()
     bucket_result = None
@@ -619,6 +632,8 @@ async def clear_data(type: str = "all", delete_img: bool = False):
         print(f"[/api/video/clear] Starting bucket clear...")
         bucket_start = time.time()
         try:
+            from src.services.storage import StorageService
+
             storage = StorageService()
             loop = asyncio.get_event_loop()
             bucket_result = await loop.run_in_executor(_STORAGE_EXECUTOR, storage.clear_bucket)
@@ -725,6 +740,12 @@ async def get_detections(
     ดึงข้อมูล detection พร้อม filter ตาม camera_id, limit, offset
     """
     try:
+        if get_storage_mode() == "json":
+            from src.services.json_investigation_service import JsonInvestigationService
+
+            records = JsonInvestigationService().list_video_detections(limit=limit + offset)
+            return records[offset : offset + limit]
+
         db = DatabaseService()
         
         query = """
@@ -781,6 +802,9 @@ async def get_videos(
     ดึงข้อมูลวิดีโอทั้งหมด (กรองตาม camera_id ได้)
     """
     try:
+        if get_storage_mode() == "json":
+            return []
+
         db = DatabaseService()
         
         query = """
@@ -823,6 +847,9 @@ async def stream_video_file(video_id: str):
     Stream video file for playback
     """
     try:
+        if get_storage_mode() == "json":
+            raise HTTPException(status_code=404, detail="Video database is disabled in JSON storage mode")
+
         db = DatabaseService()
         
         # Get video file path from database
@@ -1060,6 +1087,9 @@ async def review_video_stream(video_id: str):
     """
     Stream MJPEG of the video with bounding boxes drawn over it
     """
+    if get_storage_mode() == "json":
+        raise HTTPException(status_code=404, detail="Video database is disabled in JSON storage mode")
+
     db = DatabaseService()
     query = "SELECT file_path FROM processed_videos WHERE id::text = %s"
     with db.conn.cursor() as cur:
@@ -1086,6 +1116,9 @@ async def review_video_stream(video_id: str):
 @router.post("/videos/{video_id}/pause")
 async def pause_video_processing(video_id: str):
     """Pause an active processing task for a specific video id."""
+    if get_storage_mode() == "json":
+        raise HTTPException(status_code=409, detail="Use /api/json/queue/pause in JSON storage mode")
+
     db = DatabaseService()
     with db.conn.cursor() as cur:
         cur.execute("SELECT camera_id FROM processed_videos WHERE id::text = %s", (video_id,))
@@ -1109,6 +1142,9 @@ async def pause_video_processing(video_id: str):
 @router.post("/videos/{video_id}/resume")
 async def resume_video_processing(video_id: str):
     """Resume a paused processing task for a specific video id."""
+    if get_storage_mode() == "json":
+        raise HTTPException(status_code=409, detail="Use /api/json/queue/resume in JSON storage mode")
+
     db = DatabaseService()
     with db.conn.cursor() as cur:
         cur.execute("SELECT camera_id, file_path FROM processed_videos WHERE id::text = %s", (video_id,))
@@ -1158,15 +1194,34 @@ async def resume_video_processing(video_id: str):
 # Real-time Video Analysis with MJPEG Stream
 # ═══════════════════════════════════════════════════════════════════════════════
 
-import cv2
-import numpy as np
-from typing import AsyncGenerator
-from src.ai.detector import PersonDetector
-from src.ai.classifier import ClothingClassifier
-from fastapi.responses import StreamingResponse
-
 # Active stream registry for real-time analysis
 _STREAM_ANALYSIS_ACTIVE: dict[str, asyncio.Event] = {}
+_CV2_ANALYSIS_STATE: dict[str, dict] = {}
+_CV2_STOP_EVENTS: dict[str, asyncio.Event] = {}
+_REALTIME_DEPS: tuple[object, object, type, type] | None = None
+
+
+def _make_stream_analysis_id(camera_id: Optional[str] = None, requested_id: Optional[str] = None) -> str:
+    if requested_id:
+        safe_requested = re.sub(r"[^a-zA-Z0-9_-]", "_", requested_id)
+        return safe_requested[:96] or f"analyze_{uuid.uuid4().hex[:8]}"
+    if camera_id:
+        safe_camera_id = re.sub(r"[^a-zA-Z0-9_-]", "_", camera_id)
+        return f"analyze_{safe_camera_id}_{uuid.uuid4().hex[:4]}"
+    return f"analyze_{uuid.uuid4().hex[:8]}"
+
+
+def _get_realtime_deps():
+    """Load OpenCV and AI classes only when a realtime stream actually starts."""
+    global _REALTIME_DEPS
+    if _REALTIME_DEPS is None:
+        import cv2
+        import numpy as np
+        from src.ai.detector import PersonDetector
+        from src.ai.classifier import ClothingClassifier
+
+        _REALTIME_DEPS = (cv2, np, PersonDetector, ClothingClassifier)
+    return _REALTIME_DEPS
 
 
 def _parse_top_n(value: str) -> int | str:
@@ -1211,6 +1266,8 @@ async def _realtime_analysis_generator(
     """
     MJPEG generator that performs real-time AI analysis on video file.
     """
+    cv2, np, PersonDetector, ClothingClassifier = _get_realtime_deps()
+
     print(f"🎬 [Stream {stream_id}] Starting real-time analysis: {video_path}")
     print(f"   Settings: detector_bbox={show_detector_bbox}, track_id={show_detector_track_id}")
     print(f"   Settings: classifier_bbox={show_classifier_bbox}, class_name={show_classifier_class_name}")
@@ -1243,12 +1300,15 @@ async def _realtime_analysis_generator(
             print(f"⚠️ [Stream {stream_id}] Database connection failed: {e}")
             db = None
 
-    # Initialize storage service for image uploads
+    # Initialize storage service only when uploads can actually be used.
     storage = None
-    try:
-        storage = StorageService()
-    except Exception as e:
-        print(f"⚠️ [Stream {stream_id}] Storage service unavailable: {e}")
+    if save_to_db and (save_images or save_bbox_images):
+        try:
+            from src.services.storage import StorageService
+
+            storage = StorageService()
+        except Exception as e:
+            print(f"⚠️ [Stream {stream_id}] Storage service unavailable: {e}")
 
     # Initialize AI models
     try:
@@ -1573,12 +1633,14 @@ async def _realtime_analysis_generator(
         traceback.print_exc()
     finally:
         cap.release()
+        _STREAM_ANALYSIS_ACTIVE.pop(stream_id, None)
         print(f"🛑 [Stream {stream_id}] Stream ended")
 
 
 @router.get("/stream-analyze")
 async def stream_analyze_video(
     video_path: str = Query(..., description="Absolute path to video file"),
+    stream_id: Optional[str] = Query(None, description="Client-provided stream ID from HEAD preflight"),
     camera_id: Optional[str] = Query(None, description="Custom camera ID (default: auto-generated stream_<id>)"),
     show_detector_bbox: bool = Query(True, description="Show detector bounding boxes"),
     show_detector_track_id: bool = Query(True, description="Show detector track IDs"),
@@ -1617,14 +1679,7 @@ async def stream_analyze_video(
     if not os.path.exists(video_path):
         raise HTTPException(status_code=404, detail=f"Video file not found: {video_path}")
     
-    # Generate unique stream ID (use camera_id if provided, otherwise auto-generate)
-    import uuid
-    if camera_id:
-        # Sanitize camera_id for safe URL usage
-        safe_camera_id = re.sub(r'[^a-zA-Z0-9_-]', '_', camera_id)
-        stream_id = f"analyze_{safe_camera_id}_{uuid.uuid4().hex[:4]}"
-    else:
-        stream_id = f"analyze_{uuid.uuid4().hex[:8]}"
+    stream_id = _make_stream_analysis_id(camera_id=camera_id, requested_id=stream_id)
     
     # Create stop event
     stop_event = asyncio.Event()
@@ -1670,6 +1725,24 @@ async def stream_analyze_video(
             "Expires": "0",
             "X-Stream-Id": stream_id,
         }
+    )
+
+
+@router.head("/stream-analyze")
+async def stream_analyze_video_head(
+    video_path: str = Query(..., description="Absolute path to video file"),
+    stream_id: Optional[str] = Query(None, description="Client-provided stream ID"),
+    camera_id: Optional[str] = Query(None, description="Custom camera ID"),
+):
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail=f"Video file not found: {video_path}")
+    stream_id = _make_stream_analysis_id(camera_id=camera_id, requested_id=stream_id)
+    return Response(
+        status_code=200,
+        headers={
+            "X-Stream-Id": stream_id,
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+        },
     )
 
 
@@ -1740,26 +1813,103 @@ async def analyze_video_cv2(
     # Start background task for CV2 analysis
     import asyncio
     task_id = f"cv2_{uuid.uuid4().hex[:8]}"
+    stop_event = asyncio.Event()
+    _CV2_STOP_EVENTS[task_id] = stop_event
+    _CV2_ANALYSIS_STATE[task_id] = {
+        "status": "starting",
+        "frames_processed": 0,
+        "total_frames": 0,
+        "detections_count": 0,
+        "fps": 0.0,
+        "error": None,
+        "started_at": time.time(),
+    }
+
+    def update_cv2_state(**updates) -> None:
+        state = _CV2_ANALYSIS_STATE.setdefault(task_id, {})
+        state.update(updates)
     
     async def run_cv2_analysis():
-        """Run CV2 analysis in background."""
+        """Run CV2 analysis in an OpenCV window on the backend machine."""
+        cv2 = None
         try:
-            print(f"[VideoController] Using refactored VideoProcessor for CV2 analysis")
-            processor, pool = await _get_video_processor()
+            update_cv2_state(status="processing")
+            print(f"[VideoController] Opening CV2 analysis window for: {video_path}")
+            cv2, np, _, _ = _get_realtime_deps()
 
-            stats = await processor.process_video(
-                source=video_path,
-                camera_id=camera_id or f"cv2_{int(time.time())}",
-                video_id=None,  # No video registration for CV2 mode
-                frame_skip=1,  # CV2 processes all frames
+            cap_info = cv2.VideoCapture(video_path)
+            total_frames = int(cap_info.get(cv2.CAP_PROP_FRAME_COUNT)) if cap_info.isOpened() else 0
+            fps = cap_info.get(cv2.CAP_PROP_FPS) or 30.0 if cap_info.isOpened() else 0.0
+            cap_info.release()
+            update_cv2_state(total_frames=total_frames, fps=fps)
+
+            window_name = f"Nexus CV2 Analysis - {task_id}"
+            displayed_frames = 0
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+
+            async for chunk in _realtime_analysis_generator(
+                video_path=video_path,
+                stream_id=task_id,
+                stop_event=stop_event,
+                show_detector_bbox=show_detector_bbox,
+                show_detector_track_id=show_detector_track_id,
+                show_classifier_bbox=show_classifier_bbox,
+                show_classifier_class_name=show_classifier_class_name,
+                show_classifier_count=show_classifier_count,
+                classifier_top_n=_parse_top_n(str(classifier_top_n)),
                 save_to_db=save_to_db,
+                camera_id=camera_id,
+                frame_skip=1,
                 save_images=save_images,
+                save_bbox_images=save_bbox_images,
+            ):
+                marker = b"\r\n\r\n"
+                marker_index = chunk.find(marker)
+                if marker_index < 0:
+                    continue
+                jpeg_bytes = chunk[marker_index + len(marker):].rstrip(b"\r\n")
+                frame = cv2.imdecode(np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if frame is None:
+                    continue
+
+                displayed_frames += 1
+                update_cv2_state(frames_processed=min(displayed_frames, total_frames or displayed_frames))
+                cv2.imshow(window_name, frame)
+
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord("q")):
+                    stop_event.set()
+                    break
+                try:
+                    if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
+                        stop_event.set()
+                        break
+                except Exception:
+                    stop_event.set()
+                    break
+
+            final_status = "stopped" if stop_event.is_set() else "completed"
+            update_cv2_state(
+                status=final_status,
+                frames_processed=total_frames or displayed_frames,
+                total_frames=total_frames,
+                fps=fps,
+                error=None,
+                completed_at=time.time(),
             )
-            print(f"[VideoController] CV2 analysis completed: {stats.to_dict()}")
+            print(f"[VideoController] CV2 window analysis {final_status}: displayed {displayed_frames} frames")
         except Exception as e:
+            update_cv2_state(status="failed", error=str(e), completed_at=time.time())
             print(f"❌ CV2 Analysis Error: {e}")
             import traceback
             print(traceback.format_exc())
+        finally:
+            if cv2 is not None:
+                try:
+                    cv2.destroyWindow(f"Nexus CV2 Analysis - {task_id}")
+                except Exception:
+                    pass
+            _CV2_STOP_EVENTS.pop(task_id, None)
     
     # Create and start background task
     asyncio.create_task(run_cv2_analysis())
@@ -1768,8 +1918,26 @@ async def analyze_video_cv2(
         "status": "success",
         "message": "CV2 analysis started",
         "task_id": task_id,
-        "info": "Window will open on server machine. Press 'q' to stop."
+        "info": "CV2 processing started on the backend. Use the status endpoint to track progress."
     }
+
+
+@router.get("/analyze-cv2/status/{task_id}")
+async def get_cv2_analysis_status(task_id: str):
+    state = _CV2_ANALYSIS_STATE.get(task_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"CV2 task not found: {task_id}")
+    return {"task_id": task_id, **state}
+
+
+@router.post("/analyze-cv2/{task_id}/stop")
+async def stop_cv2_analysis(task_id: str):
+    event = _CV2_STOP_EVENTS.get(task_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"No active CV2 task with ID '{task_id}'")
+    event.set()
+    _CV2_ANALYSIS_STATE.setdefault(task_id, {})["status"] = "stopping"
+    return {"status": "stop_requested", "task_id": task_id}
 
 
 @router.post("/analyze-background")

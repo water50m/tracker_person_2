@@ -1,11 +1,26 @@
 from fastapi import APIRouter, HTTPException
 from src.services.database import DatabaseService
+from src.config_loader import get_storage_mode
 from pydantic import BaseModel
 
 router = APIRouter()
 
-# Singleton — สร้างครั้งเดียวตอน import (setup_tables รันแค่ครั้งเดียว)
-_db = DatabaseService()
+_db: DatabaseService | None = None
+
+
+def _get_db() -> DatabaseService:
+    global _db
+    if _db is None:
+        _db = DatabaseService()
+    return _db
+
+
+def _db_disabled_response() -> dict:
+    return {
+        "cameras": [],
+        "storage_mode": "json",
+        "message": "Camera database is disabled while JSON storage mode is active",
+    }
 
 
 class CameraCreate(BaseModel):
@@ -27,8 +42,13 @@ class RelationshipCreate(BaseModel):
 async def get_all_cameras():
     """Get all cameras"""
     try:
-        db = _db
+        if get_storage_mode() == "json":
+            return _db_disabled_response()
+
+        db = _get_db()
         db._ensure_connection()
+        if db.conn is None:
+            return {"cameras": []}
         
         query = "SELECT id, name, source_url, is_active FROM cameras ORDER BY id"
         
@@ -47,6 +67,10 @@ async def get_all_cameras():
             
             return {"cameras": cameras}
             
+    except HTTPException:
+        raise
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -54,8 +78,13 @@ async def get_all_cameras():
 async def create_camera(camera: CameraCreate):
     """Create a new camera"""
     try:
-        db = _db
+        if get_storage_mode() == "json":
+            raise HTTPException(status_code=409, detail="Camera database is disabled in JSON storage mode")
+
+        db = _get_db()
         db._ensure_connection()
+        if db.conn is None:
+            raise HTTPException(status_code=503, detail="Database not connected")
         
         query = """
             INSERT INTO cameras (name, source_url, is_active) 
@@ -82,8 +111,13 @@ async def create_camera(camera: CameraCreate):
 async def update_camera(camera_id: int, camera: CameraUpdate):
     """Update an existing camera"""
     try:
-        db = _db
+        if get_storage_mode() == "json":
+            raise HTTPException(status_code=409, detail="Camera database is disabled in JSON storage mode")
+
+        db = _get_db()
         db._ensure_connection()
+        if db.conn is None:
+            raise HTTPException(status_code=503, detail="Database not connected")
         
         query = """
             UPDATE cameras 
@@ -117,8 +151,13 @@ async def update_camera(camera_id: int, camera: CameraUpdate):
 async def delete_camera(camera_id: int):
     """Delete a camera"""
     try:
-        db = _db
+        if get_storage_mode() == "json":
+            raise HTTPException(status_code=409, detail="Camera database is disabled in JSON storage mode")
+
+        db = _get_db()
         db._ensure_connection()
+        if db.conn is None:
+            raise HTTPException(status_code=503, detail="Database not connected")
         
         # First delete related relationships
         with db.conn.cursor() as cur:

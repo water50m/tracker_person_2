@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 ai_processing_types.py - Core data structures for AI processing
 
@@ -11,7 +13,6 @@ These types are shared between:
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple
 from enum import Enum
-import numpy as np
 
 
 class ClothingCategory(str, Enum):

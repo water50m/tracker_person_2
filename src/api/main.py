@@ -1,15 +1,25 @@
+import os
 import time
 from contextlib import asynccontextmanager
-from typing import List
-from fastapi import FastAPI, HTTPException, Query
+from pathlib import Path
+from typing import TYPE_CHECKING, List
+
+WORKSPACE = Path(__file__).resolve().parents[2]
+os.environ.setdefault("YOLO_CONFIG_DIR", str(WORKSPACE / ".ultralytics"))
+os.environ.setdefault("MPLCONFIGDIR", str(WORKSPACE / ".matplotlib"))
+
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi import UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from src.api.schemas import (
     DetectionResponse, SearchCriteria, PersonTimeline,
     DailyStats, ClothingStats, AdvancedSearchRequest
 )
-from src.api.controllers import DetectionController
 from fastapi.middleware.cors import CORSMiddleware
+
+if TYPE_CHECKING:
+    from src.api.controllers import DetectionController
+
 from src.api.video_controller import router as video_router
 from src.api.routes.realtime import router as realtime_router
 from src.api.routes.camera_relationships import router as camera_relationships_router
@@ -21,6 +31,7 @@ from src.api.routes.dashboard_api import router as dashboard_api_router
 from src.api.routes.video_queue import router as video_queue_router
 from src.api.routes.json_controller import router as json_controller_router
 from src.config_loader import get_storage_mode
+from src.services.json_investigation_service import JsonInvestigationService
 from src.services.database import DatabaseService
 
 
@@ -55,14 +66,36 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="CCTV AI Analytics System", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def log_api_duration(request: Request, call_next):
+    start = time.perf_counter()
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        duration_ms = (time.perf_counter() - start) * 1000
+        status_code = response.status_code if response is not None else 500
+        if request.url.path.startswith("/api"):
+            print(
+                f"[API-TIME] {request.method} {request.url.path} "
+                f"status={status_code} duration={duration_ms:.1f}ms",
+                flush=True,
+            )
+        if response is not None:
+            response.headers["X-Process-Time-Ms"] = f"{duration_ms:.1f}"
+
+
 class LazyDetectionController:
     """Delay database-backed controller creation until a DB endpoint is used."""
 
     def __init__(self):
-        self._controller: DetectionController | None = None
+        self._controller: "DetectionController | None" = None
 
-    def _get(self) -> DetectionController:
+    def _get(self) -> "DetectionController":
         if self._controller is None:
+            from src.api.controllers import DetectionController
+
             self._controller = DetectionController()
         return self._controller
 
@@ -113,13 +146,26 @@ app.include_router(json_controller_router)
 # แต่ถ้าเขียนรวมใน main ก็เขียนต่อได้เลย เช่น:
 controller = LazyDetectionController()
 
+
+def _json_mode_empty_search(page: int = 1):
+    return {"results": [], "total": 0, "page": page, "has_more": False, "storage_mode": "json"}
+
+
+def _json_investigation() -> JsonInvestigationService:
+    return JsonInvestigationService()
+
+
 # --- กลุ่มข้อมูลดิบ (Data List) ---
 @app.get("/api/detections", response_model=List[DetectionResponse])
 async def list_detections(limit: int = 20, offset: int = 0):
+    if get_storage_mode() == "json":
+        return []
     return controller.get_all(limit, offset)
 
 @app.post("/api/search", response_model=List[DetectionResponse])
 async def search(criteria: SearchCriteria):
+    if get_storage_mode() == "json":
+        return []
     return controller.search(criteria)
 
 @app.get("/api/search/persons")
@@ -138,6 +184,23 @@ async def search_persons(
     temperature: str | None = Query(None),
     vibrancy: str | None = Query(None),
 ):
+    if get_storage_mode() == "json":
+        return _json_investigation().search_persons(
+            logic=logic,
+            threshold=threshold,
+            camera_id=camera_id,
+            video_id=video_id,
+            start_time=start_time,
+            end_time=end_time,
+            page=page,
+            limit=limit,
+            clothing=clothing,
+            colors=colors,
+            brightness=brightness,
+            temperature=temperature,
+            vibrancy=vibrancy,
+        )
+
     try:
         return controller.search_persons(
             logic=logic,
@@ -162,6 +225,12 @@ async def search_persons(
 # --- กลุ่มติดตามรายคน (Tracking) ---
 @app.get("/api/person/{track_id}", response_model=PersonTimeline)
 async def person_detail(track_id: int):
+    if get_storage_mode() == "json":
+        try:
+            return _json_investigation().trace_person(person_id=person_id)
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
     result = controller.get_person_timeline(track_id)
     if not result.history:
         raise HTTPException(status_code=404, detail="Track ID not found")
@@ -169,6 +238,12 @@ async def person_detail(track_id: int):
 
 @app.get("/api/persons/{person_id}/trace")
 async def trace_person(person_id: str):
+    if get_storage_mode() == "json":
+        try:
+            return _json_investigation().trace_person(person_id=person_id)
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
     try:
         return controller.trace_person(person_id=person_id)
     except ValueError as e:
@@ -181,6 +256,12 @@ async def trace_person(person_id: str):
 @app.get("/api/persons/{person_id}")
 async def get_person_by_id(person_id: str):
     """Get person by UUID person_id"""
+    if get_storage_mode() == "json":
+        try:
+            return _json_investigation().trace_person(person_id=person_id)
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
     try:
         return controller.trace_person(person_id=person_id)
     except ValueError as e:
@@ -193,6 +274,12 @@ async def get_person_by_id(person_id: str):
 @app.get("/api/detections/{detection_id}")
 async def get_detection_detail(detection_id: str):
     """Get all details of a specific detection by ID"""
+    if get_storage_mode() == "json":
+        try:
+            return _json_investigation().get_detection_detail(detection_id)
+        except LookupError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
     try:
         return controller.get_detection_detail(detection_id)
     except ValueError as e:
@@ -205,19 +292,28 @@ async def get_detection_detail(detection_id: str):
 # --- กลุ่มสถิติ (Analytics) ---
 @app.get("/api/stats/hourly", response_model=List[DailyStats])
 async def hourly_metrics():
+    if get_storage_mode() == "json":
+        return []
     return controller.get_hourly_stats()
 
 @app.get("/api/stats/clothing", response_model=List[ClothingStats])
 async def clothing_metrics():
+    if get_storage_mode() == "json":
+        return []
     return controller.get_clothing_distribution()
 
 @app.get("/api/stats/unique-persons")
 async def unique_persons_metrics():
+    if get_storage_mode() == "json":
+        return {"count": 0, "storage_mode": "json"}
     return {"count": controller.get_unique_persons_today()}
 
 # --- การจัดการข้อมูล ---
 @app.delete("/api/detections/{id}")
 async def remove_record(id: str):
+    if get_storage_mode() == "json":
+        raise HTTPException(status_code=409, detail="Detection database is disabled in JSON storage mode")
+
     controller.delete_detection(id)
     return {"status": "deleted", "id": id}
 
@@ -282,6 +378,19 @@ async def search_advanced(
         "threshold": 0.1
     }
     """
+    if get_storage_mode() == "json":
+        return _json_investigation().search_advanced(
+            clothing_groups=[g.model_dump() for g in request.clothing_groups],
+            global_logic=request.global_logic,
+            threshold=request.threshold,
+            camera_id=request.camera_id,
+            video_id=request.video_id,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            page=page,
+            limit=limit,
+        )
+
     try:
         result = controller.search_advanced(
             clothing_groups=[g.model_dump() for g in request.clothing_groups],

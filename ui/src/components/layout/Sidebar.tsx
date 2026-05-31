@@ -6,6 +6,35 @@ import { useState } from "react";
 
 const NAV_ITEMS = [
   {
+    href: "/dashboard",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5">
+        <path d="M3 12h18" />
+        <path d="M3 6h18" />
+        <path d="M3 18h18" />
+        <circle cx="7" cy="6" r="1.5" />
+        <circle cx="12" cy="12" r="1.5" />
+        <circle cx="17" cy="18" r="1.5" />
+      </svg>
+    ),
+    label: "DASHBOARD",
+    sublabel: "LIVE MONITOR",
+    accent: "cyan",
+  },
+  {
+    href: "/streams",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5">
+        <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14" />
+        <path d="M3 8a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8z" />
+        <circle cx="9" cy="12" r="1.5" />
+      </svg>
+    ),
+    label: "STREAMS",
+    sublabel: "RTSP REGISTRY",
+    accent: "violet",
+  },
+  {
     href: "/realtime",
     icon: (
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5">
@@ -92,6 +121,11 @@ export default function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
 
+  const warmRoute = (href: string) => {
+    if (pathname.startsWith(href)) return;
+    void fetch(href, { cache: "force-cache" }).catch(() => null);
+  };
+
   return (
     <aside
       className={`
@@ -138,6 +172,8 @@ export default function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              onMouseEnter={() => warmRoute(item.href)}
+              onFocus={() => warmRoute(item.href)}
               className={`
                 group relative flex items-center gap-3 px-3 py-3 rounded-sm
                 transition-all duration-200 overflow-hidden

@@ -5,8 +5,11 @@ import { usePathname } from "next/navigation";
 
 const PAGE_TITLES: Record<string, { label: string; color: string }> = {
   "/dashboard": { label: "// LIVE MONITOR", color: "text-cyan-500" },
+  "/streams": { label: "// STREAM REGISTRY", color: "text-violet-400" },
+  "/realtime": { label: "// VIDEO PROCESSING", color: "text-red-500" },
   "/investigation": { label: "// SEARCH & TRACE", color: "text-pink-500" },
   "/input-manager": { label: "// INPUT MANAGER", color: "text-yellow-500" },
+  "/system": { label: "// SYSTEM CONFIG", color: "text-orange-400" },
 };
 
 export default function TopBar() {

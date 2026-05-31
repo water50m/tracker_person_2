@@ -1,13 +1,11 @@
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
-from src.api.controllers import DetectionController
 from src.services.stream_manager import stream_manager
 import asyncio
 import json
 from datetime import datetime
 
 router = APIRouter()
-controller = DetectionController()
 
 @router.get("/api/events/stream")
 async def events_stream(

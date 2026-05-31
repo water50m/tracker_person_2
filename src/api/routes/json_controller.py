@@ -11,6 +11,7 @@ from src.config_loader import (
     get_json_storage_root,
     get_storage_mode,
 )
+from src.services.json_investigation_service import JsonInvestigationService
 from src.services.json_video_queue_service import get_json_video_queue_service
 
 router = APIRouter(prefix="/api/json", tags=["JSON Storage"])
@@ -50,6 +51,10 @@ class JsonQueueAddRequest(BaseModel):
 
 class JsonQueueJobRequest(BaseModel):
     job_id: str
+
+
+class JsonClearRequest(BaseModel):
+    include_orphan_results: bool = False
 
 
 class JsonQueueReprocessRequest(BaseModel):
@@ -166,6 +171,21 @@ async def json_storage_status():
         "json_index": str(index_path),
         "json_index_exists": index_path.exists(),
     }
+
+
+@router.get("/stats")
+async def json_storage_stats():
+    return JsonInvestigationService().stats()
+
+
+@router.delete("/clear")
+async def clear_json_storage(include_orphan_results: bool = Query(False)):
+    return JsonInvestigationService().clear(include_orphan_results=include_orphan_results)
+
+
+@router.post("/clear")
+async def clear_json_storage_post(request: JsonClearRequest):
+    return JsonInvestigationService().clear(include_orphan_results=request.include_orphan_results)
 
 
 @router.get("/queue/status")

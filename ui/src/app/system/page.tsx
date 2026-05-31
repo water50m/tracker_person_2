@@ -66,28 +66,48 @@ export default function SystemPage() {
     const [uploadMsg, setUploadMsg] = useState<string>("");
     const [isDragOver, setIsDragOver] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const fetchPromiseRef = useRef<Promise<void> | null>(null);
+    const lastFetchAtRef = useRef(0);
+    const backendUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000").replace(
+        "://localhost:",
+        "://127.0.0.1:"
+    );
 
-    const fetchData = useCallback(async () => {
+    const fetchData = useCallback(async (force = false) => {
+        const now = Date.now();
+        if (!force && fetchPromiseRef.current) return fetchPromiseRef.current;
+        if (!force && now - lastFetchAtRef.current < 2000) return;
         setLoading(true);
-        try {
+        const request = (async () => {
             const [settingsRes, modelsRes] = await Promise.all([
-                fetch("/api/settings"),
-                fetch("/api/settings/models"),
+                fetch(`${backendUrl}/api/settings`, { cache: "no-store" }),
+                fetch(`${backendUrl}/api/settings/models`, { cache: "no-store" }),
             ]);
             if (settingsRes.ok) {
                 const d = await settingsRes.json();
-                setData(d);
+                const normalized = {
+                    ...d,
+                    defaults: d.defaults ?? {},
+                    modified_keys: Array.isArray(d.modified_keys) ? d.modified_keys : [],
+                };
+                setData(normalized);
                 setDraft(d.config);
-                setModifiedKeys(d.modified_keys ?? []);
+                setModifiedKeys(normalized.modified_keys);
             }
             if (modelsRes.ok) {
                 const m = await modelsRes.json();
                 setModelFiles(m.models ?? []);
             }
+            lastFetchAtRef.current = Date.now();
+        })();
+        fetchPromiseRef.current = request;
+        try {
+            await request;
         } finally {
+            fetchPromiseRef.current = null;
             setLoading(false);
         }
-    }, []);
+    }, [backendUrl]);
 
     useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -95,14 +115,14 @@ export default function SystemPage() {
         setSaving(true);
         setSaveMsg(null);
         try {
-            const res = await fetch("/api/settings", {
+            const res = await fetch(`${backendUrl}/api/settings`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(draft),
             });
             if (res.ok) {
                 setSaveMsg("✓ SAVED");
-                await fetchData();
+                await fetchData(true);
             } else {
                 setSaveMsg("✗ FAILED");
             }
@@ -128,7 +148,7 @@ export default function SystemPage() {
             });
             if (res.ok) {
                 setSaveMsg(keys ? "✓ TAB RESET" : "✓ ALL RESET");
-                await fetchData();
+                await fetchData(true);
             } else {
                 setSaveMsg("✗ RESET FAILED");
             }
@@ -149,12 +169,12 @@ export default function SystemPage() {
         const form = new FormData();
         form.append("file", file);
         try {
-            const res = await fetch("/api/settings/models", { method: "POST", body: form });
+            const res = await fetch(`${backendUrl}/api/settings/models/upload`, { method: "POST", body: form });
             const json = await res.json();
             if (res.ok) {
                 setUploadStatus("done");
                 setUploadMsg(`✓ ${json.name} uploaded (${json.size_mb} MB)`);
-                await fetchData();
+                await fetchData(true);
             } else {
                 setUploadStatus("error");
                 setUploadMsg(json.error ?? "Upload failed");
@@ -463,6 +483,8 @@ function DetectionTab({
 function SystemTab({ data }: { data: SettingsData | null }) {
     if (!data) return null;
     const hw = data.hardware;
+    const modifiedKeys = Array.isArray(data.modified_keys) ? data.modified_keys : [];
+    const defaults = data.defaults ?? {};
     return (
         <div className="grid grid-cols-3 gap-6 w-full">
             <SettingsCard title="HARDWARE">
@@ -495,8 +517,8 @@ function SystemTab({ data }: { data: SettingsData | null }) {
                 <SettingsCard title="ACTIVE CONFIGURATION">
                     <div className="grid grid-cols-3 gap-4">
                         {Object.entries(data.config).map(([k, v]) => {
-                            const isModified = data.modified_keys.includes(k);
-                            const defaultVal = data.defaults[k as keyof SystemConfig];
+                            const isModified = modifiedKeys.includes(k);
+                            const defaultVal = defaults[k as keyof SystemConfig];
                             return (
                                 <div key={k} className={`border rounded-sm p-4 ${isModified ? "bg-amber-950/20 border-amber-700/40" : "bg-slate-900/40 border-slate-800"}`}>
                                     <div className={`font-mono text-xs tracking-widest uppercase mb-1 flex items-center gap-1 ${isModified ? "text-amber-600" : "text-slate-500"}`}>
@@ -504,7 +526,7 @@ function SystemTab({ data }: { data: SettingsData | null }) {
                                         {isModified && <span className="text-amber-400">✎</span>}
                                     </div>
                                     <div className={`font-mono text-base font-bold ${isModified ? "text-amber-400" : "text-orange-400"}`}>{String(v)}</div>
-                                    {isModified && (
+                                    {isModified && defaultVal !== undefined && (
                                         <div className="font-mono text-xs text-slate-500 mt-1">default: {String(defaultVal)}</div>
                                     )}
                                 </div>
@@ -519,37 +541,67 @@ function SystemTab({ data }: { data: SettingsData | null }) {
 
 // ─── Tab: Database ────────────────────────────────────────────
 function DatabaseTab() {
-    const [stats, setStats] = useState<{ detections: number; videos: number; cameras: number } | null>(null);
+    const [stats, setStats] = useState<{ detections: number; videos: number; cameras: number; store: "db" | "json" } | null>(null);
     const [purging, setPurging] = useState(false);
     const [purgeMsg, setPurgeMsg] = useState<string | null>(null);
-    const backendUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+    const backendUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000").replace(
+        "://localhost:",
+        "://127.0.0.1:"
+    );
 
     useEffect(() => {
-        Promise.all([
-            fetch("/api/video/detections?limit=1").then((r) => r.json()).catch(() => null),
-            fetch("/api/video/videos").then((r) => r.json()).catch(() => null),
-            fetch(`${backendUrl}/api/cameras`).then((r) => r.json()).catch(() => null),
-        ]).then(([det, vids, cams]) => {
-            setStats({
-                detections: Array.isArray(det) ? det.length : 0,
-                videos: Array.isArray(vids) ? vids.length : 0,
-                cameras: Array.isArray(cams?.cameras) ? cams.cameras.length : 0,
-            });
-        });
+        let cancelled = false;
+
+        const loadStats = async () => {
+            const status = await fetch(`${backendUrl}/api/json/status`).then((r) => r.json()).catch(() => null);
+            if (cancelled) return;
+
+            if (status?.storage_mode === "json") {
+                const jsonStats = await fetch(`${backendUrl}/api/json/stats`).then((r) => r.json()).catch(() => null);
+                if (!cancelled) {
+                    setStats({
+                        detections: Number(jsonStats?.detections ?? 0),
+                        videos: Number(jsonStats?.jobs ?? 0),
+                        cameras: Number(jsonStats?.cameras ?? 0),
+                        store: "json",
+                    });
+                }
+                return;
+            }
+
+            const [det, vids, cams] = await Promise.all([
+                fetch("/api/video/detections?limit=1").then((r) => r.json()).catch(() => null),
+                fetch("/api/video/videos").then((r) => r.json()).catch(() => null),
+                fetch(`${backendUrl}/api/cameras`).then((r) => r.json()).catch(() => null),
+            ]);
+            if (!cancelled) {
+                setStats({
+                    detections: Array.isArray(det) ? det.length : 0,
+                    videos: Array.isArray(vids) ? vids.length : 0,
+                    cameras: Array.isArray(cams?.cameras) ? cams.cameras.length : 0,
+                    store: "db",
+                });
+            }
+        };
+
+        void loadStats();
+        return () => {
+            cancelled = true;
+        };
     }, [backendUrl]);
 
     return (
         <div className="grid grid-cols-2 gap-6 w-full">
             <SettingsCard title="CONNECTION">
-                <InfoRow label="HOST" value="localhost:5432" />
-                <InfoRow label="DATABASE" value="cctv_analytics" />
-                <InfoRow label="ORM" value="psycopg2 (raw SQL)" />
-                <InfoRow label="OBJECT STORE" value="MinIO" />
+                <InfoRow label="STORE MODE" value={stats?.store === "json" ? "JSON FILES" : "DATABASE"} highlight={stats?.store === "json"} />
+                <InfoRow label="HOST" value={stats?.store === "json" ? "LOCAL FILESYSTEM" : "localhost:5432"} />
+                <InfoRow label="DATABASE" value={stats?.store === "json" ? "DISABLED" : "cctv_analytics"} />
+                <InfoRow label="OBJECT STORE" value={stats?.store === "json" ? "DISABLED" : "MinIO"} />
             </SettingsCard>
 
             <SettingsCard title="DATA SUMMARY">
-                <InfoRow label="DETECTIONS" value={stats ? String(stats.detections) : "…"} />
-                <InfoRow label="VIDEOS" value={stats ? String(stats.videos) : "…"} />
+                <InfoRow label="DETECTIONS" value={stats ? String(stats.detections) : "..."} />
+                <InfoRow label={stats?.store === "json" ? "JSON JOBS" : "VIDEOS"} value={stats ? String(stats.videos) : "..."} />
                 <InfoRow label="CAMERAS" value={stats ? String(stats.cameras) : "…"} />
             </SettingsCard>
 
@@ -559,18 +611,35 @@ function DatabaseTab() {
                         <div className="flex-1">
                             <FieldLabel>PURGE DETECTIONS</FieldLabel>
                             <p className="font-mono text-sm text-slate-500 mt-1">
-                                Delete all detection records from the database. This cannot be undone.
+                                {stats?.store === "json"
+                                    ? "Delete JSON result folders, job index records, queue state, and local saved images. This cannot be undone."
+                                    : "Delete all detection records from the database. This cannot be undone."}
                             </p>
                         </div>
                         <button
                             onClick={async () => {
-                                if (!confirm("Delete ALL detection records? This cannot be undone.")) return;
+                                const message = stats?.store === "json"
+                                    ? "Delete ALL JSON mode results and local saved images under the configured JSON result root? This cannot be undone."
+                                    : "Delete ALL detection records? This cannot be undone.";
+                                if (!confirm(message)) return;
                                 setPurging(true);
                                 setPurgeMsg(null);
-                                await new Promise((r) => setTimeout(r, 1200));
-                                setPurging(false);
-                                setPurgeMsg("Not yet implemented — please run manually via SQL");
-                                setTimeout(() => setPurgeMsg(null), 4000);
+                                try {
+                                    const response = stats?.store === "json"
+                                        ? await fetch(`${backendUrl}/api/json/clear`, { method: "DELETE" })
+                                        : await fetch(`${backendUrl}/api/video/clear?type=all&delete_img=true`, { method: "DELETE" });
+                                    const data = await response.json().catch(() => ({}));
+                                    if (!response.ok) throw new Error(data.detail || data.error || "Purge failed");
+                                    setPurgeMsg(stats?.store === "json"
+                                        ? `JSON cleared: ${data.deleted_dirs ?? 0} result folders removed`
+                                        : "Database records cleared");
+                                    setStats((prev) => prev ? { ...prev, detections: 0, videos: 0 } : prev);
+                                } catch (error) {
+                                    setPurgeMsg(error instanceof Error ? error.message : "Purge failed");
+                                } finally {
+                                    setPurging(false);
+                                    setTimeout(() => setPurgeMsg(null), 5000);
+                                }
                             }}
                             disabled={purging}
                             className="flex-shrink-0 font-mono text-sm font-bold px-6 py-2.5 rounded-sm border border-red-500/60 bg-red-950/30 text-red-400 hover:bg-red-900/40 hover:border-red-400 transition-all disabled:opacity-50"

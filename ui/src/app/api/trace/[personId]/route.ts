@@ -56,6 +56,11 @@ export async function GET(
         timestamp: d.timestamp,
         thumbnail_url: d.thumbnail_url ?? null,
         confidence: d.confidence ?? 0.9,
+        clothing_class: d.clothing_class,
+        color: d.color,
+        color_profile: d.color_profile,
+        video_id: d.video_id,
+        video_time_offset: d.video_time_offset,
         bounding_box: d.bounding_box ?? null,
       })),
       cameras: data.cameras ?? [],
@@ -85,5 +90,10 @@ interface TraceDetection {
   timestamp: string;
   thumbnail_url?: string;
   confidence?: number;
+  clothing_class?: string;
+  color?: string;
+  color_profile?: Record<string, number>;
+  video_id?: string;
+  video_time_offset?: number;
   bounding_box?: { x: number; y: number; w: number; h: number };
 }

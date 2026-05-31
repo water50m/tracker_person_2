@@ -300,6 +300,144 @@ def save_jpeg(path: Path, image, quality: int) -> None:
     cv2.imwrite(str(path), image, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
 
 
+class JsonIdImageBatchSaver:
+    """Save at most one local person crop per display ID for JSON jobs.
+
+    The selected crop is the latest frame where both the tuned frame result and
+    the rolling vote contain two clothing objects. Final outfit votes are applied
+    later, so they are intentionally not used here.
+    """
+
+    def __init__(self, args: argparse.Namespace, image_root: Path, timings: Timings) -> None:
+        self.enabled = bool(getattr(args, "save_json_id_images", False))
+        self.image_root = image_root / "json_id"
+        self.timings = timings
+        self.jpeg_quality = int(getattr(args, "jpeg_quality", 85))
+        self.lost_timeout_frames = max(0, int(getattr(args, "json_id_image_lost_timeout_frames", 30)))
+        self.candidates: dict[int, dict[str, Any]] = {}
+        self.last_seen: dict[int, int] = {}
+        self.saved_ids: set[int] = set()
+        self.skipped_without_candidate: set[int] = set()
+        self.saved_rows: list[dict[str, Any]] = []
+
+    def _candidate_items(self, person: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+        tuned_items = list(person.get("result_clothing") or person.get("clothing") or [])
+        stable = person.get("stable_clothing") or {}
+        stable_classes = [str(name) for name in (stable.get("classes") or []) if name]
+        return tuned_items, stable_classes
+
+    def _remember_candidate(self, frame_no: int, frame, person: dict[str, Any]) -> None:
+        track_id = int(person["id"])
+        if track_id in self.saved_ids:
+            return
+        tuned_items, stable_classes = self._candidate_items(person)
+        if len(tuned_items) != 2 or len(stable_classes) != 2:
+            return
+        bbox = person.get("bbox")
+        if not bbox:
+            return
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return
+        self.candidates[track_id] = {
+            "frame": frame_no,
+            "person_ref": person,
+            "crop": crop.copy(),
+            "label": person.get("stable_label") or (person.get("stable_clothing") or {}).get("label") or person.get("result_label") or "",
+            "classes": stable_classes,
+            "tuned_classes": [str(item.get("class", "")) for item in tuned_items if item.get("class")],
+        }
+
+    def observe(self, frame_no: int, frame, persons: list[dict[str, Any]]) -> None:
+        if not self.enabled:
+            return
+        current_ids = {int(person["id"]) for person in persons if int(person.get("id", -1)) >= 0}
+        for person in persons:
+            track_id = int(person.get("id", -1))
+            if track_id < 0:
+                continue
+            self.last_seen[track_id] = frame_no
+            self._remember_candidate(frame_no, frame, person)
+
+        lost_ids = [
+            track_id
+            for track_id, last_seen in list(self.last_seen.items())
+            if track_id not in current_ids
+            and track_id not in self.saved_ids
+            and frame_no - last_seen >= self.lost_timeout_frames
+        ]
+        self.flush(lost_ids, reason="lost")
+
+    def remap_id(self, old_id: int, new_id: int) -> None:
+        if not self.enabled or old_id == new_id:
+            return
+        if old_id in self.saved_ids:
+            return
+        old_candidate = self.candidates.pop(old_id, None)
+        current_candidate = self.candidates.get(new_id)
+        if old_candidate and (
+            current_candidate is None or int(old_candidate.get("frame", -1)) >= int(current_candidate.get("frame", -1))
+        ):
+            self.candidates[new_id] = old_candidate
+            old_candidate["person_ref"]["id"] = new_id
+        if old_id in self.last_seen:
+            self.last_seen[new_id] = max(self.last_seen.get(new_id, -1), self.last_seen.pop(old_id))
+
+    def flush(self, track_ids: list[int] | set[int], reason: str) -> None:
+        if not self.enabled:
+            return
+        start = now()
+        saved_count = 0
+        for track_id in sorted(set(int(track_id) for track_id in track_ids)):
+            if track_id in self.saved_ids:
+                continue
+            candidate = self.candidates.pop(track_id, None)
+            if not candidate:
+                self.skipped_without_candidate.add(track_id)
+                continue
+            frame_no = int(candidate["frame"])
+            path = self.image_root / f"id_{track_id}" / f"frame_{frame_no:05d}_id_{track_id}.jpg"
+            save_jpeg(path, candidate["crop"], self.jpeg_quality)
+            person_ref = candidate["person_ref"]
+            person_ref["image_path"] = str(path)
+            person_ref["image_saved_reason"] = reason
+            person_ref["image_saved_from"] = "json_id_batch_latest_two_object_stable_vote"
+            person_ref["image_saved_classes"] = candidate["classes"]
+            self.saved_ids.add(track_id)
+            saved_count += 1
+            self.saved_rows.append(
+                {
+                    "id": track_id,
+                    "frame": frame_no,
+                    "path": str(path),
+                    "reason": reason,
+                    "stable_classes": candidate["classes"],
+                    "tuned_classes": candidate["tuned_classes"],
+                    "label": candidate["label"],
+                }
+            )
+        if saved_count:
+            self.timings.add("json_id_image_batch_save", now() - start, saved_count)
+
+    def close(self) -> dict[str, Any]:
+        if not self.enabled:
+            return {"enabled": False, "status": "skipped"}
+        remaining_ids = set(self.candidates) - self.saved_ids
+        self.flush(remaining_ids, reason="end_of_video")
+        return {
+            "enabled": True,
+            "status": "completed",
+            "mode": "one_local_person_crop_per_display_id",
+            "selection": "latest frame before final_outfit_vote with len(result_clothing)==2 and len(stable_clothing.classes)==2",
+            "lost_timeout_frames": self.lost_timeout_frames,
+            "saved_count": len(self.saved_rows),
+            "skipped_without_two_object_candidate": len(self.skipped_without_candidate),
+            "images_dir": str(self.image_root),
+            "images": self.saved_rows,
+        }
+
+
 def add_item_colors(frame, item: dict[str, Any], width: int, height: int) -> None:
     bbox = item.get("bbox")
     if not bbox:
@@ -1718,6 +1856,7 @@ def predict_full(args: argparse.Namespace) -> tuple[dict[str, Any], Timings]:
     resource_sampler = ResourceSampler(args.monitor_resources, args.resource_sample_interval_frames, output_dir)
     streaming_db = StreamingRealDbSaver(args, timings, video_path, width, height, output_dir)
     progress_reporter = ProgressReporter(output_dir, timings, args.progress_report_interval_frames)
+    json_id_image_saver = JsonIdImageBatchSaver(args, image_root, timings)
     detections_count = 0
     person_rows_before_iou = 0
     person_rows_after_iou = 0
@@ -1968,6 +2107,9 @@ def predict_full(args: argparse.Namespace) -> tuple[dict[str, Any], Timings]:
             timings.add("reid_online_step", now() - reid_start, 1)
             for event in reid_events:
                 online_reid.remapped_person_rows += remap_existing_frames(frames, event)
+                json_id_image_saver.remap_id(int(event["new_id"]), int(event["recovered_id"]))
+
+        json_id_image_saver.observe(frame_index, frame, visible_persons)
 
         frame_row = {"frame": frame_index, "time": frame_index / fps, "persons": visible_persons}
         frames.append(frame_row)
@@ -2053,6 +2195,7 @@ def predict_full(args: argparse.Namespace) -> tuple[dict[str, Any], Timings]:
         "clothing_temporal_cache_frames": args.clothing_temporal_cache_frames,
         "color_analysis_resize": args.color_analysis_resize,
         "save_local_images": args.save_local_images,
+        "save_json_id_images": args.save_json_id_images,
         "json_only_output": args.json_only_output,
         "frame_prefetch": args.frame_prefetch,
         "frame_prefetch_size": args.frame_prefetch_size,
@@ -2073,6 +2216,7 @@ def predict_full(args: argparse.Namespace) -> tuple[dict[str, Any], Timings]:
         else online_reid.summary()
     )
     metadata["display_id_source"] = "viewer_reid_clothing_color"
+    metadata["json_id_images"] = json_id_image_saver.close()
 
     outfit_vote_start = now()
     apply_final_outfit_votes(data, args.final_outfit_lost_timeout_frames)
@@ -2194,6 +2338,8 @@ def main() -> None:
     parser.add_argument("--clothing-temporal-cache-frames", type=int, default=0)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--save-local-images", action="store_true")
+    parser.add_argument("--save-json-id-images", action="store_true")
+    parser.add_argument("--json-id-image-lost-timeout-frames", type=int, default=30)
     parser.add_argument("--crop-save-interval", type=int, default=1)
     parser.add_argument("--save-sqlite", action="store_true")
     parser.add_argument("--json-only-output", action="store_true")

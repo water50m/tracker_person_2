@@ -55,6 +55,7 @@ export default function RealtimeTab() {
   const [loadingSource, setLoadingSource] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [localPreviewUrl, setLocalPreviewUrl] = useState<string | null>(null);
   const [videoEnded, setVideoEnded] = useState(false);
   const [tempFileId, setTempFileId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -81,6 +82,15 @@ export default function RealtimeTab() {
   const [saveBboxImages, setSaveBboxImages] = useState(true);
   const [backgroundTaskId, setBackgroundTaskId] = useState<string | null>(null);
   const [streamId, setStreamId] = useState<string | null>(null);
+  const [cv2TaskId, setCv2TaskId] = useState<string | null>(null);
+  const [cv2Status, setCv2Status] = useState<{
+    status: string;
+    frames_processed: number;
+    total_frames: number;
+    detections_count: number;
+    fps: number;
+    error?: string | null;
+  } | null>(null);
   const [backgroundStatus, setBackgroundStatus] = useState<{
     status: string;
     frames_processed: number;
@@ -103,10 +113,23 @@ export default function RealtimeTab() {
   const [showCameraDropdown, setShowCameraDropdown] = useState(false);
   const cameraDropdownRef = useRef<HTMLDivElement>(null);
 
-  const backendUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-  const [storageMode, setStorageMode] = useState<"db" | "json">("db");
+  const backendUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000").replace(
+    "://localhost:",
+    "://127.0.0.1:"
+  );
+  const [storageMode, setStorageMode] = useState<"db" | "json" | null>(null);
   const isJsonMode = storageMode === "json";
   const queueBase = isJsonMode ? `${backendUrl}/api/json/queue` : `${backendUrl}/api/video-queue`;
+
+  useEffect(() => {
+    if (!selectedFile) {
+      setLocalPreviewUrl(null);
+      return;
+    }
+    const objectUrl = URL.createObjectURL(selectedFile);
+    setLocalPreviewUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [selectedFile]);
 
   useEffect(() => {
     const fetchStorageMode = async () => {
@@ -128,6 +151,13 @@ export default function RealtimeTab() {
 
   // Fetch cameras on mount
   useEffect(() => {
+    if (storageMode === null) return;
+    if (isJsonMode) {
+      setCameraList([]);
+      setIsLoadingCameras(false);
+      return;
+    }
+
     const fetchCameras = async () => {
       setIsLoadingCameras(true);
       try {
@@ -143,7 +173,7 @@ export default function RealtimeTab() {
       }
     };
     fetchCameras();
-  }, [backendUrl]);
+  }, [backendUrl, isJsonMode, storageMode]);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -170,6 +200,18 @@ export default function RealtimeTab() {
       setTempFileId(null);
     }
   }, [tempFileId, backendUrl]);
+
+  const finishWebStream = useCallback(() => {
+    setVideoEnded(true);
+    setIsStreaming(false);
+    setStreamUrl(null);
+    setStreamId(null);
+    if (videoEndCheckRef.current) {
+      clearInterval(videoEndCheckRef.current);
+      videoEndCheckRef.current = null;
+    }
+    cleanupTempFile();
+  }, [cleanupTempFile]);
 
   // Cleanup on component unmount
   useEffect(() => {
@@ -231,6 +273,7 @@ export default function RealtimeTab() {
 
   // Queue Management Functions
   const fetchQueueStatus = async () => {
+    if (storageMode === null) return;
     try {
       const statusUrl = isJsonMode
         ? `${queueBase}/status`
@@ -248,6 +291,8 @@ export default function RealtimeTab() {
 
   // Conditional polling: 3s when processing, 10min when idle
   useEffect(() => {
+    if (storageMode === null) return;
+
     fetchQueueStatus();
 
     // Determine poll interval based on whether there's a processing job
@@ -259,7 +304,7 @@ export default function RealtimeTab() {
     }, intervalMs);
 
     return () => clearInterval(pollInterval);
-  }, [backendUrl, queueBase, isJsonMode, queueStatus?.current_job?.id]);
+  }, [backendUrl, queueBase, isJsonMode, storageMode, queueStatus?.current_job?.id]);
 
   const addToQueue = async () => {
     if (selectedFiles.length === 0 && !videoPath.trim()) {
@@ -280,8 +325,8 @@ export default function RealtimeTab() {
           formData.append("display_mode", "background");
           formData.append("priority", queuePriority.toString());
           formData.append("save_to_db", isJsonMode ? "false" : "true");
-          formData.append("save_images", isJsonMode ? String(saveImages) : "true");
-          formData.append("save_bbox_images", isJsonMode ? String(saveBboxImages) : "true");
+          formData.append("save_images", isJsonMode ? "false" : "true");
+          formData.append("save_bbox_images", isJsonMode ? "false" : "true");
           formData.append("frame_skip", "5");
 
           const response = await fetch(`${queueBase}/upload-add`, {
@@ -592,6 +637,10 @@ export default function RealtimeTab() {
 
   const startStream = async () => {
     let resolvedUrl = "";
+    setError(null);
+    setVideoEnded(false);
+    setCv2TaskId(null);
+    setCv2Status(null);
 
     // Handle different input types
     if (inputType === "file") {
@@ -665,8 +714,10 @@ export default function RealtimeTab() {
 
     try {
       if (displayMode === "web") {
+        const requestedStreamId = `analyze_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
         const params = new URLSearchParams({
           video_path: resolvedUrl,
+          stream_id: requestedStreamId,
           show_detector_bbox: String(showDetectorBbox),
           show_detector_track_id: String(showDetectorTrackId),
           show_classifier_bbox: String(showClassifierBbox),
@@ -679,14 +730,30 @@ export default function RealtimeTab() {
           ...(cameraId.trim() && { camera_id: cameraId.trim() }),
         });
 
-        // Make a HEAD request first to get the stream ID
-        const headResponse = await fetch(`${backendUrl}/api/video/stream-analyze?${params.toString()}`, {
-          method: "HEAD",
-        });
-        const detectedStreamId = headResponse.headers.get("X-Stream-Id");
-        if (detectedStreamId) {
-          setStreamId(detectedStreamId);
+        let activeStreamId = requestedStreamId;
+        let streamPreflightSupported = true;
+        try {
+          const headResponse = await fetch(`${backendUrl}/api/video/stream-analyze?${params.toString()}`, {
+            method: "HEAD",
+          });
+          if (headResponse.ok) {
+            activeStreamId = headResponse.headers.get("X-Stream-Id") || requestedStreamId;
+          } else if (headResponse.status === 404 || headResponse.status === 405) {
+            streamPreflightSupported = false;
+            console.warn(`[Realtime] Stream preflight unsupported (${headResponse.status}); starting stream directly.`);
+          } else {
+            const errorText = await headResponse.text();
+            throw new Error(`HTTP ${headResponse.status}: ${errorText || "stream preflight failed"}`);
+          }
+        } catch (err) {
+          if (err instanceof Error && !err.message.includes("stream preflight failed")) {
+            streamPreflightSupported = false;
+            console.warn("[Realtime] Stream preflight failed; starting stream directly.", err);
+          } else {
+            throw err;
+          }
         }
+        setStreamId(activeStreamId);
 
         const url = `${backendUrl}/api/video/stream-analyze?${params.toString()}`;
         setStreamUrl(url);
@@ -694,42 +761,30 @@ export default function RealtimeTab() {
         setVideoEnded(false);
 
         // Start monitoring for video end - check both error and active streams
+        const streamStartedAt = Date.now();
         videoEndCheckRef.current = setInterval(async () => {
           const img = document.querySelector('img[src*="stream-analyze"]') as HTMLImageElement;
           if (img) {
             img.onerror = () => {
               console.log("Stream ended - video completed (error)");
-              setVideoEnded(true);
-              setIsStreaming(false);
-              setStreamUrl(null);
-              setStreamId(null);
-              if (videoEndCheckRef.current) {
-                clearInterval(videoEndCheckRef.current);
-                videoEndCheckRef.current = null;
-              }
-              cleanupTempFile();
+              finishWebStream();
             };
           }
 
           // Also poll active streams to detect natural stream end
-          const currentStreamId = detectedStreamId;
+          const currentStreamId = activeStreamId;
           if (currentStreamId) {
             try {
               const activeResponse = await fetch(`${backendUrl}/api/video/stream-analyze/active`);
               if (activeResponse.ok) {
                 const data = await activeResponse.json();
-                const isStillActive = data.active_streams?.includes(currentStreamId);
-                if (!isStillActive) {
+                const activeStreams = data.active_streams ?? [];
+                const isStillActive = activeStreams.includes(currentStreamId);
+                const fallbackStillHasAnyStream = !streamPreflightSupported && activeStreams.length > 0;
+                const withinStartupGrace = Date.now() - streamStartedAt < 3000;
+                if (!isStillActive && !fallbackStillHasAnyStream && !withinStartupGrace) {
                   console.log("Stream ended - video completed (inactive)");
-                  setVideoEnded(true);
-                  setIsStreaming(false);
-                  setStreamUrl(null);
-                  setStreamId(null);
-                  if (videoEndCheckRef.current) {
-                    clearInterval(videoEndCheckRef.current);
-                    videoEndCheckRef.current = null;
-                  }
-                  cleanupTempFile();
+                  finishWebStream();
                 }
               }
             } catch (err) {
@@ -762,24 +817,49 @@ export default function RealtimeTab() {
             const errorText = await response.text();
             throw new Error(`HTTP ${response.status}: ${errorText}`);
           }
+          const result = await response.json();
+          const taskId = result.task_id as string | undefined;
+          if (!taskId) {
+            throw new Error("Backend did not return a CV2 task ID");
+          }
 
+          setCv2TaskId(taskId);
+          setCv2Status({
+            status: "processing",
+            frames_processed: 0,
+            total_frames: 0,
+            detections_count: 0,
+            fps: 0,
+            error: null,
+          });
           setIsStreaming(true);
+          setVideoEnded(false);
           setError(null);
 
-          // For CV2 mode, the backend runs in a separate window and we need to poll for completion
-          // Start polling every 2 seconds to check if the stream is still active
+          // CV2 mode runs backend processing without a browser MJPEG stream.
+          // Poll the CV2 task status so the UI does not mark it ended while it is still processing.
           const checkCv2End = setInterval(async () => {
             try {
-              // Check active streams endpoint
-              const statusResponse = await fetch(`${backendUrl}/api/active-streams`);
+              const statusResponse = await fetch(`${backendUrl}/api/video/analyze-cv2/status/${taskId}`);
               if (statusResponse.ok) {
-                const streams = await statusResponse.json();
-                // If no active streams, the CV2 window has closed
-                if (!streams.active_streams || streams.active_streams.length === 0) {
-                  console.log("CV2 stream ended - resetting state");
+                const status = await statusResponse.json();
+                setCv2Status({
+                  status: status.status,
+                  frames_processed: status.frames_processed ?? 0,
+                  total_frames: status.total_frames ?? 0,
+                  detections_count: status.detections_count ?? 0,
+                  fps: status.fps ?? 0,
+                  error: status.error ?? null,
+                });
+                if (["completed", "failed", "stopped"].includes(status.status)) {
+                  console.log(`CV2 task ${taskId} ended: ${status.status}`);
                   setIsStreaming(false);
-                  setVideoEnded(true);
+                  setVideoEnded(status.status === "completed");
+                  if (status.status === "failed") {
+                    setError(`CV2 analysis failed: ${status.error || "Unknown error"}`);
+                  }
                   clearInterval(checkCv2End);
+                  (window as any)._cv2CheckInterval = null;
                 }
               }
             } catch (err) {
@@ -812,8 +892,8 @@ export default function RealtimeTab() {
                 display_mode: "background",
                 priority: queuePriority,
                 frame_skip: 5,
-                save_images: saveImages,
-                save_bbox_images: saveBboxImages,
+                save_images: false,
+                save_bbox_images: false,
               }),
             });
 
@@ -887,6 +967,15 @@ export default function RealtimeTab() {
         console.log("Failed to stop stream on backend (may already be ended):", err);
       }
     }
+    if (cv2TaskId) {
+      try {
+        await fetch(`${backendUrl}/api/video/analyze-cv2/${cv2TaskId}/stop`, {
+          method: "POST",
+        });
+      } catch (err) {
+        console.log("Failed to stop CV2 task on backend (may already be ended):", err);
+      }
+    }
 
     setStreamUrl(null);
     setIsStreaming(false);
@@ -896,6 +985,8 @@ export default function RealtimeTab() {
     setBackgroundTaskId(null);
     setBackgroundStatus(null);
     setStreamId(null);
+    setCv2TaskId(null);
+    setCv2Status(null);
     cleanupTempFile();
 
     // Clear video end check interval
@@ -1360,15 +1451,22 @@ export default function RealtimeTab() {
       <div className="flex flex-col gap-4">
         <SettingsCard title="DISPLAY OPTIONS">
           <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <span className="font-mono text-xs text-slate-400">Save Detection Data</span>
-              <Toggle label="SAVE TO DATABASE" value={saveToDatabase} onChange={setSaveToDatabase} />
-            </div>
+            {isJsonMode ? (
+              <div className="border border-slate-700/60 bg-slate-900/40 px-3 py-2 rounded-sm">
+                <span className="font-mono text-xs text-slate-400">Storage</span>
+                <p className="font-mono text-xs text-yellow-400 mt-1">JSON mode saves local result files only</p>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between">
+                <span className="font-mono text-xs text-slate-400">Save Detection Data</span>
+                <Toggle label="SAVE TO DATABASE" value={saveToDatabase} onChange={setSaveToDatabase} />
+              </div>
+            )}
             <div className="flex items-center justify-between">
               <span className="font-mono text-xs text-slate-400">Show Terminal Logs</span>
               <Toggle label="SHOW LOGS" value={showLogs} onChange={toggleLogs} />
             </div>
-            {saveToDatabase && (
+            {!isJsonMode && saveToDatabase && (
               <>
                 <div className="border-t border-slate-800/40 pt-4 space-y-3">
                   <div className="flex items-center justify-between">
@@ -1431,6 +1529,10 @@ export default function RealtimeTab() {
                   alt="AI Analysis Stream"
                   className="w-full h-full object-contain"
                   onError={() => {
+                    if (streamId) {
+                      finishWebStream();
+                      return;
+                    }
                     setError("Failed to load stream. Check video path and API.");
                     setIsStreaming(false);
                   }}
@@ -1445,12 +1547,23 @@ export default function RealtimeTab() {
               )}
             </div>
             <div className="mt-3 flex items-center justify-between">
-              <span className="font-mono text-xs text-slate-500">{isStreaming ? "● LIVE" : "○ IDLE"}</span>
+              <span className="font-mono text-xs text-slate-500">{isStreaming ? "● LIVE" : videoEnded ? "○ ENDED" : "○ IDLE"}</span>
               {isStreaming && <span className="font-mono text-xs text-green-400 animate-pulse">PROCESSING</span>}
             </div>
           </SettingsCard>
         ) : displayMode === "cv2" ? (
-          <SettingsCard title="CV2 WINDOW STATUS">
+          <SettingsCard title="CV2 PROCESSING STATUS">
+            {localPreviewUrl && (
+              <div className="relative aspect-video bg-black border border-slate-800 rounded-sm overflow-hidden">
+                <video
+                  src={localPreviewUrl}
+                  className="w-full h-full object-contain"
+                  controls
+                  muted
+                  playsInline
+                />
+              </div>
+            )}
             <div className="bg-slate-900/60 border border-slate-800 rounded-sm p-6">
               {isStreaming ? (
                 <div className="flex flex-col items-center gap-3">
@@ -1459,8 +1572,21 @@ export default function RealtimeTab() {
                       <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                     </svg>
                   </div>
-                  <span className="font-mono text-sm text-green-400">Window opened on server</span>
-                  <p className="font-mono text-xs text-slate-500 text-center">Check the server machine for the video window</p>
+                  <span className="font-mono text-sm text-green-400">Backend processing active</span>
+                  <div className="w-full max-w-sm space-y-2">
+                    <div className="h-1.5 bg-slate-800 rounded-sm overflow-hidden">
+                      <div
+                        className="h-full bg-green-400 transition-all"
+                        style={{
+                          width: `${cv2Status?.total_frames ? Math.min(100, Math.round((cv2Status.frames_processed / cv2Status.total_frames) * 100)) : 12}%`,
+                        }}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between font-mono text-[10px] text-slate-500">
+                      <span>{cv2Status?.frames_processed ?? 0}/{cv2Status?.total_frames || "?"} frames</span>
+                      <span>{cv2Status?.detections_count ?? 0} detections</span>
+                    </div>
+                  </div>
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-3">
@@ -1469,13 +1595,15 @@ export default function RealtimeTab() {
                       <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                     </svg>
                   </div>
-                  <span className="font-mono text-sm text-slate-500">Window not active</span>
+                  <span className="font-mono text-sm text-slate-500">
+                    {cv2Status?.status === "completed" ? "Processing completed" : "Processing not active"}
+                  </span>
                 </div>
               )}
             </div>
             <div className="mt-3 flex items-center justify-between">
-              <span className="font-mono text-xs text-slate-500">{isStreaming ? "● RUNNING" : "○ STOPPED"}</span>
-              {isStreaming && <span className="font-mono text-xs text-green-400 animate-pulse">WINDOW ACTIVE</span>}
+              <span className="font-mono text-xs text-slate-500">{isStreaming ? "● RUNNING" : cv2Status?.status === "completed" ? "○ ENDED" : "○ STOPPED"}</span>
+              {isStreaming && <span className="font-mono text-xs text-green-400 animate-pulse">PROCESSING</span>}
             </div>
           </SettingsCard>
         ) : (
