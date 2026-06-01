@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from src.services.database import DatabaseService
 from src.api.schemas import DetectionResponse
 from src.config_loader import get_storage_mode
-from src.services.clothing_postprocess import FinalOutfitVoter, StableClothingVoter, select_clothing_items
+from src.services.clothing_postprocess import FinalOutfitVoter, StableClothingVoter
 
 # Add src to path for Feature Flag and VideoProcessor
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -741,10 +741,12 @@ async def get_detections(
     """
     try:
         if get_storage_mode() == "json":
-            from src.services.json_investigation_service import JsonInvestigationService
-
-            records = JsonInvestigationService().list_video_detections(limit=limit + offset)
-            return records[offset : offset + limit]
+            try:
+                from src.services.json_investigation_service import JsonInvestigationService
+                records = JsonInvestigationService().list_video_detections(limit=limit + offset)
+                return records[offset : offset + limit]
+            except Exception:
+                return []
 
         db = DatabaseService()
         
@@ -1262,61 +1264,85 @@ async def _realtime_analysis_generator(
     frame_skip: int = 1,
     save_images: bool = True,
     save_bbox_images: bool = True,
+    save_json_results: bool = False,
+    json_job_id: Optional[str] = None,
 ) -> AsyncGenerator[bytes, None]:
     """
     MJPEG generator that performs real-time AI analysis on video file.
+    When save_json_results=True, accumulates detection data and writes
+    prediction_results.json to track_result/<json_job_id>/ on completion.
     """
-    cv2, np, PersonDetector, ClothingClassifier = _get_realtime_deps()
+    import copy as _copy
+    from collections import defaultdict as _defaultdict
+    from types import SimpleNamespace as _SimpleNamespace
+    import cv2
+    import numpy as np
+    from ultralytics import YOLO as _YOLO
 
-    print(f"🎬 [Stream {stream_id}] Starting real-time analysis: {video_path}")
-    print(f"   Settings: detector_bbox={show_detector_bbox}, track_id={show_detector_track_id}")
-    print(f"   Settings: classifier_bbox={show_classifier_bbox}, class_name={show_classifier_class_name}")
-    print(f"   Settings: class_count={show_classifier_count}, top_n={classifier_top_n}")
-    print(f"   Save to DB: {save_to_db}, frame_skip={frame_skip}, save_images={save_images}, save_bbox_images={save_bbox_images}")
-    
+    _WORKSPACE = Path(__file__).resolve().parents[2]
+    _SCRIPTS = str(_WORKSPACE / "scripts")
+    if _SCRIPTS not in sys.path:
+        sys.path.insert(0, _SCRIPTS)
+
+    from evaluate_clothing_model import YoloPredictor as _YoloPredictor, prediction_result as _prediction_result
+    from predict_video_clothing_viewer import (
+        clamp_bbox as _clamp_bbox,
+        dedupe_persons_by_iou as _dedupe_persons_by_iou,
+        update_track_votes as _update_track_votes,
+    )
+    from pipeline_shared import (
+        OnlineReID as _OnlineReID,
+        add_item_colors as _add_item_colors,
+        apply_detailed_color_with_cache as _apply_detailed_color_with_cache,
+        class_summary as _class_summary,
+        id_color as _id_color,
+        profile_from_person as _profile_from_person,
+    )
+    from src.config_loader import get_detector_model_path, get_classifier_model_path, get_device
+
     # Initialize database connection if saving is enabled
     db = None
+    video_id = None
     effective_camera_id = camera_id if camera_id else f"stream_{stream_id}"
-    resolved_camera_id = None
     if save_to_db:
         try:
             from src.services.database import DatabaseService
             db = DatabaseService()
-            # Resolve camera name to ID (creates new camera if doesn't exist)
             if camera_id:
                 resolved_camera_id = db.resolve_camera_id(camera_id)
                 effective_camera_id = str(resolved_camera_id)
-            # Register a temporary video for this stream
             video_id = db.register_video(
                 camera_id=effective_camera_id,
                 label=f"Real-time Stream {stream_id}",
                 filename=os.path.basename(video_path),
                 file_path=video_path,
-                width=0,  # Will be updated later
-                height=0   # Will be updated later
+                width=0,
+                height=0,
             )
-            print(f"📊 [Stream {stream_id}] Database saving enabled - Video ID: {video_id}, Camera ID: {effective_camera_id}")
-        except Exception as e:
-            print(f"⚠️ [Stream {stream_id}] Database connection failed: {e}")
+        except Exception:
             db = None
 
-    # Initialize storage service only when uploads can actually be used.
     storage = None
     if save_to_db and (save_images or save_bbox_images):
         try:
             from src.services.storage import StorageService
-
             storage = StorageService()
-        except Exception as e:
-            print(f"⚠️ [Stream {stream_id}] Storage service unavailable: {e}")
+        except Exception:
+            pass
 
-    # Initialize AI models
+    # Initialize AI models (same as predict_video_full_pipeline)
     try:
-        detector = PersonDetector()
-        classifier = ClothingClassifier()
+        _device = get_device()
+        _detector = _YOLO(str(Path(get_detector_model_path()).resolve()))
+        _detector.to(_device)
+        _clothing = _YoloPredictor(
+            Path(get_classifier_model_path()).resolve(),
+            device=_device,
+            imgsz=224,
+            conf=0.25,
+            half=False,
+        )
     except Exception as e:
-        print(f"❌ [Stream {stream_id}] Model initialization failed: {e}")
-        # Yield error frame
         error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
         cv2.putText(error_frame, f"Model Error: {e}", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         ret, buffer = cv2.imencode('.jpg', error_frame)
@@ -1326,7 +1352,6 @@ async def _realtime_analysis_generator(
     
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"❌ [Stream {stream_id}] Cannot open video: {video_path}")
         error_frame = np.zeros((480, 640, 3), dtype=np.uint8)
         cv2.putText(error_frame, "Cannot open video", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         ret, buffer = cv2.imencode('.jpg', error_frame)
@@ -1336,13 +1361,132 @@ async def _realtime_analysis_generator(
     
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frame_time = 1.0 / fps
-    
-    # Track IDs for detector
-    track_id_mapping: dict[int, int] = {}  # byte_track_id -> our_id
-    next_track_id = 1
-    stable_clothing_voter = StableClothingVoter()
-    final_outfit_voter = FinalOutfitVoter()
-    
+    width_cap  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height_cap = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # ── JSON result accumulator ────────────────────────────────────────────
+    # Keyed by frame_no so multiple persons per frame are grouped correctly.
+    _JSON_BATCH_SIZE = 100      # flush to disk every N AI-processed frames
+    _json_frame_persons: dict[int, list] = {}
+    _json_image_dir: Path | None = None
+    _json_out_dir: Path = Path(".")   # set below when save_json_results
+    if save_json_results:
+        if not json_job_id:
+            json_job_id = f"stream_{stream_id}_{uuid.uuid4().hex[:8]}"
+        from src.config_loader import get_json_storage_root
+        _json_out_dir = Path(get_json_storage_root()).resolve() / json_job_id
+        _json_out_dir.mkdir(parents=True, exist_ok=True)
+        if save_images:
+            _json_image_dir = _json_out_dir / "images" / "json_id"
+            _json_image_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── Stable video copy: {videoname}_{camname}.ext ─────────────────
+        # Strip temp prefix (temp_<hex12>_originalname.mp4 → originalname.mp4)
+        import re as _re, shutil as _sh
+        _src_video = Path(video_path)
+        _raw_stem = _re.sub(r'^temp_[0-9a-f]{8,}_', '', _src_video.stem)
+        _safe_cam = _re.sub(r'[^\w\-]', '_', effective_camera_id)  # sanitize cam id for filename
+        _stable_name = f"{_raw_stem}_{_safe_cam}{_src_video.suffix}"
+
+        # Check if this videoname_camname already exists in any job dir (dedup)
+        _json_root = Path(get_json_storage_root()).resolve()
+        _existing_video: Path | None = None
+        for _job_dir in _json_root.iterdir():
+            if not _job_dir.is_dir() or _job_dir.name == "json_jobs":
+                continue
+            _candidate = _job_dir / _stable_name
+            if _candidate.exists():
+                _existing_video = _candidate
+                break
+
+        if _existing_video:
+            video_path = str(_existing_video)
+        else:
+            _dest_video = _json_out_dir / _stable_name
+            try:
+                _sh.copy2(str(_src_video), str(_dest_video))
+                video_path = str(_dest_video)
+            except Exception:
+                pass
+
+    # latest voted class name per track_id — updated incrementally, written on flush
+    _json_track_votes: dict[int, dict] = {}
+
+    def _flush_json_results(*, final: bool = False) -> None:
+        """Write voted class names per track_id to prediction_results.json (atomic replace).
+
+        During processing: writes only tracks that have a non-empty stable_label.
+        On final flush: writes full frames array with complete metadata.
+        """
+        import json as _j
+
+        _metadata = {
+            "source_video": video_path,
+            "camera_id": effective_camera_id,
+            "fps": fps,
+            "width": width_cap,
+            "height": height_cap,
+            "job_id": json_job_id,
+            "stream_id": stream_id,
+            "status": "completed" if final else "processing",
+        }
+
+        if final:
+            _frames = [
+                {"frame": _fn, "time": round(_fn / fps, 4), "persons": _ps}
+                for _fn, _ps in sorted(_json_frame_persons.items())
+            ]
+            _data = {"metadata": _metadata, "frames": _frames}
+        else:
+            _votes_with_result = {
+                str(_tid): _v
+                for _tid, _v in _json_track_votes.items()
+                if _v.get("stable_label")
+            }
+            if not _votes_with_result:
+                return
+            _data = {"metadata": _metadata, "track_votes": _votes_with_result}
+
+        _tmp = _json_out_dir / "prediction_results.json.tmp"
+        _out = _json_out_dir / "prediction_results.json"
+        _tmp.write_text(_j.dumps(_data, ensure_ascii=False), encoding="utf-8")
+        _tmp.replace(_out)
+        print(f"[{stream_id}] saved prediction_results.json — {'final' if final else 'batch'}")
+
+    # Pipeline state (same as predict_video_full_pipeline)
+    _vote_history: dict = _defaultdict(dict)
+    _clothing_temporal_cache: dict = {}
+    _detailed_color_cache: dict = {}
+    _reid_args = _SimpleNamespace(
+        reid_color_threshold=0.70,
+        reid_confirmation_frames=30,
+        reid_min_hits=10,
+        reid_max_gap_frames=45,
+        reid_aggregate_slot_history=10,
+        disable_reid=False,
+    )
+    _online_reid = _OnlineReID(_reid_args)
+    _PERSON_CONF = 0.45
+    _IOUthreshold = 0.50
+    _CLOTHING_TEMPORAL_CACHE_FRAMES = 0  # disabled by default (set >0 to enable)
+    _TOP_K = 20
+    _BATCH_SIZE = 32
+
+    # ── Smart JSON save state ──────────────────────────────────────────────
+    # Flush triggers:
+    #   • New ID first seen
+    #   • Same ID every 100 frames
+    #   • Recovery event (ID reappears after being lost)
+    #   • ID disappears (last frame after _JSON_ID_LOST_TIMEOUT absent frames)
+    # Recovered IDs (reappeared after loss) are NOT accumulated.
+    _JSON_ID_LOST_TIMEOUT = 30
+    _json_known_ids:     set[int] = set()
+    _json_lost_ids:      set[int] = set()
+    _json_recovered_ids: set[int] = set()
+    _json_id_frame_count: dict[int, int] = {}
+    _json_id_last_seen:   dict[int, int] = {}
+    _json_flush_pending = False
+
     frame_count = 0
     last_process_time = asyncio.get_event_loop().time()
     
@@ -1350,18 +1494,13 @@ async def _realtime_analysis_generator(
         while not stop_event.is_set():
             ret, frame = cap.read()
             if not ret:
-                print(f"✅ [Stream {stream_id}] Video ended at frame {frame_count}")
-                final_outfits = final_outfit_voter.summary()
-                if final_outfits.get("track_count"):
-                    print(f"👕 [Stream {stream_id}] Final outfit votes: {final_outfits}")
+                final_outfits = _online_reid.summary() if hasattr(_online_reid, "summary") else {}
                 # Send video end notification
                 if save_to_db and db and video_id:
                     try:
-                        # Update video status to completed
                         db.update_video_status(video_id, "completed")
-                        print(f"📊 [Stream {stream_id}] Video marked as completed in database")
-                    except Exception as e:
-                        print(f"⚠️ [Stream {stream_id}] Failed to update video status: {e}")
+                    except Exception:
+                        pass
                 
                 # Yield final frame with video end message
                 end_frame = np.zeros((480, 640, 3), dtype=np.uint8)
@@ -1380,7 +1519,8 @@ async def _realtime_analysis_generator(
                 break
             
             frame_count += 1
-            
+            _cur_ids: set[int] = set()  # reset each frame; populated inside AI block
+
             # Frame skip logic: only process AI on every Nth frame
             should_process_ai = (frame_count % frame_skip) == 0
             
@@ -1396,221 +1536,239 @@ async def _realtime_analysis_generator(
                     )
                 continue
             
-            # AI Processing (only on frame_skip intervals)
+            # ── AI Processing — same logic as predict_video_full_pipeline ──
             try:
-                results = detector.track_people(frame)
-                
-                # Log detection results for debugging
-                if results and hasattr(results, 'boxes') and results.boxes is not None:
-                    num_detections = len(results.boxes)
-                    if num_detections > 0 and frame_count % 30 == 0:  # Log every 30 frames
-                        print(f"🎯 [Stream {stream_id}] Frame {frame_count}: Detected {num_detections} person(s)")
-                else:
-                    if frame_count % 30 == 0:  # Log every 30 frames
-                        print(f"⚠️ [Stream {stream_id}] Frame {frame_count}: No detections")
-                
-                if results and hasattr(results, 'boxes') and results.boxes is not None:
-                    # Process each detection
-                    for box in results.boxes:
-                        x1, y1, x2, y2 = map(int, box.xyxy[0])
-                        
-                        # Get track ID
-                        track_id_obj = getattr(box, 'id', None)
-                        byte_id = int(track_id_obj[0]) if track_id_obj is not None else None
-                        
-                        if byte_id is not None:
-                            if byte_id not in track_id_mapping:
-                                track_id_mapping[byte_id] = next_track_id
-                                next_track_id += 1
-                            our_id = track_id_mapping[byte_id]
-                        else:
-                            our_id = None
-                        
-                        # Extract person crop for classification
-                        person_crop = frame[y1:y2, x1:x2]
-                        
-                        # Get classification predictions and apply production clothing flow.
-                        raw_class_predictions = []
-                        tuned_items = []
-                        stable_items = []
-                        if person_crop.size > 0 and classifier.model is not None:
-                            prediction_top_n = "all" if classifier_top_n == "all" else max(6, int(classifier_top_n or 1))
-                            raw_class_predictions = classifier.predict_top_n(person_crop, top_n=prediction_top_n)
-                            selection = select_clothing_items(raw_class_predictions)
-                            tuned_items = selection.items
-                            track_key = our_id if our_id is not None else f"untracked:{frame_count}:{x1}:{y1}"
-                            final_outfit_voter.record(track_key, frame_count, tuned_items)
-                            stable_vote = stable_clothing_voter.update(track_key, tuned_items)
-                            stable_items = stable_vote.items or tuned_items
-                        class_predictions = [
-                            (item.class_name, item.confidence, _item_bbox_xyxy(item))
-                            for item in stable_items
-                        ]
-                        
-                        # Save to database if enabled
-                        if db and our_id is not None:
-                            try:
-                                # Extract tuned/stable clothing category
-                                primary_item = stable_items[0] if stable_items else None
-                                clothing_category = primary_item.class_name if primary_item else None
+                result = _detector.track(
+                    frame,
+                    persist=True,
+                    tracker="bytetrack.yaml",
+                    classes=[0],
+                    conf=_PERSON_CONF,
+                    imgsz=640,
+                    device=_device,
+                    verbose=False,
+                )[0]
 
-                                # Unified color analysis
-                                from src.ai.color_analysis_unified import analyze_person_colors, build_db_detection_data
+                # ── Extract persons with clamp_bbox ──────────────────────
+                persons = []
+                crop_meta = []
+                boxes = getattr(result, "boxes", None)
+                if boxes is not None and len(boxes) > 0:
+                    ids = boxes.id
+                    if ids is None:
+                        boxes = []
+                    else:
+                        for det_idx, box in enumerate(boxes):
+                            bbox = _clamp_bbox([int(v) for v in box.xyxy[0].tolist()], width_cap, height_cap)
+                            if bbox is None:
+                                continue
+                            track_id = int(ids[det_idx].item())
+                            if track_id < 0:
+                                continue
+                            x1, y1, x2, y2 = bbox
+                            crop = frame[y1:y2, x1:x2]
+                            if crop.size == 0:
+                                continue
+                            person = {
+                                "id": track_id,
+                                "original_id": track_id,
+                                "bbox": bbox,
+                                "confidence": float(box.conf.item()),
+                                "color": _id_color(track_id),
+                                "clothing": [],
+                                "raw_clothing": [],
+                                "result_clothing": [],
+                                "stable_clothing": {"label": "", "classes": []},
+                                "stable_label": "",
+                                "label": "",
+                                "reid_profile": {},
+                            }
+                            persons.append(person)
+                            crop_meta.append({"person": person, "crop": crop, "offset": (x1, y1)})
 
-                                color_results = analyze_person_colors(
-                                    person_crop=person_crop,
-                                    clothing_type=clothing_category or "Unknown",
-                                    embedder=None  # No Re-ID for realtime
-                                )
+                # ── Clothing classify + color analysis ───────────────────
+                predict_metas = []
+                predict_crops = []
+                for meta in crop_meta:
+                    p = meta["person"]
+                    tid = int(p["id"])
+                    cached = _clothing_temporal_cache.get(tid)
+                    cache_age = frame_count - int(cached.get("frame", -10**9)) if cached else 10**9
+                    if _CLOTHING_TEMPORAL_CACHE_FRAMES > 0 and cached and cache_age < _CLOTHING_TEMPORAL_CACHE_FRAMES:
+                        raw_items = _copy.deepcopy(cached.get("raw_clothing") or [])
+                        final_items = _copy.deepcopy(cached.get("result_clothing") or [])
+                        p["raw_clothing"] = raw_items
+                        p["clothing"] = final_items
+                        p["result_clothing"] = final_items
+                        p["label"] = _class_summary(final_items)
+                        p["stable_clothing"] = _update_track_votes(_vote_history, p["id"], final_items)
+                        p["stable_label"] = p["stable_clothing"]["label"]
+                        p["reid_profile"] = _profile_from_person(p)
+                    else:
+                        predict_metas.append(meta)
+                        predict_crops.append(meta["crop"])
 
-                                # Initialize image paths
-                                image_path = None
-                                bbox_image_path = None
-
-                                # Upload person crop image if enabled
-                                if save_images and storage is not None and person_crop.size > 0:
-                                    try:
-                                        object_name = f"detections/{effective_camera_id}/{video_id or 'no-video'}/{frame_count}_{our_id}_{uuid.uuid4().hex[:8]}.jpg"
-                                        crop_copy = person_crop.copy()
-                                        upload_future = _UPLOAD_EXECUTOR.submit(storage.upload_image, crop_copy, object_name)
-                                        # Wait for upload to complete
-                                        image_path = await asyncio.get_running_loop().run_in_executor(
-                                            None, upload_future.result, 10
-                                        )
-                                    except Exception as e:
-                                        print(f"⚠️ [Stream {stream_id}] Person image upload failed: {e}")
-
-                                # Upload bbox frame image if enabled
-                                if save_bbox_images and storage is not None:
-                                    try:
-                                        bbox_object_name = f"detections/{effective_camera_id}/{video_id or 'no-video'}/bbox_{frame_count}_{our_id}_{uuid.uuid4().hex[:8]}.jpg"
-                                        bbox_frame = frame.copy()
-                                        cv2.rectangle(bbox_frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                                        label_text = f"ID:{our_id} {clothing_category or 'Person'}"
-                                        cv2.putText(bbox_frame, label_text, (x1, y1 - 10),
-                                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                                        bbox_copy = bbox_frame.copy()
-                                        bbox_upload_future = _UPLOAD_EXECUTOR.submit(storage.upload_image, bbox_copy, bbox_object_name)
-                                        # Wait for upload to complete
-                                        bbox_image_path = await asyncio.get_running_loop().run_in_executor(
-                                            None, bbox_upload_future.result, 10
-                                        )
-                                    except Exception as e:
-                                        print(f"⚠️ [Stream {stream_id}] Bbox image upload failed: {e}")
-
-                                # Build standardized detection data
-                                detection_data = build_db_detection_data(
-                                    track_id=our_id,
-                                    clothing_type=clothing_category or "unknown",
-                                    confidence=primary_item.confidence if primary_item else 0.0,
-                                    color_results=color_results,
-                                    bbox=[x1, y1, x2, y2],
-                                    camera_id=effective_camera_id,
-                                    video_id=video_id,
-                                    video_time_offset=frame_count / fps,
-                                    image_path=image_path or "",
-                                    bbox_image_path=bbox_image_path or "",
-                                )
-
-                                # Insert into database (color data goes to detection_colors table)
-                                detection_id = db.insert_detection(
-                                    camera_id=detection_data['camera_id'],
-                                    track_id=detection_data['track_id'],
-                                    class_name=detection_data['class_name'],
-                                    image_path=image_path,  # Pass None if not uploaded
-                                    category=detection_data['category'],
-                                    video_time_offset=detection_data['video_time_offset'],
-                                    video_id=detection_data['video_id'],
-                                    bbox=detection_data['bbox'],
-                                    embedding=detection_data['embedding'],
-                                )
-                                
-                                # Insert color data into detection_colors table
-                                if detection_id:
-                                    db.insert_detection_colors(
-                                        detection_id=detection_id,
-                                        top_colors=color_results.get('top_colors', []),
-                                        brightness_groups=color_results.get('brightness_groups', {}),
-                                        vibrancy_groups=color_results.get('vibrancy_groups', {}),
-                                        temperature_groups=color_results.get('temperature_groups', {}),
-                                        clothing_groups=color_results.get('clothing_color_groups', {}),
-                                        primary_color=color_results.get('primary_detailed_color', 'unknown'),
-                                        primary_tone_group=color_results.get('primary_tone_group', 'unknown'),
+                if predict_crops:
+                    predictions = _clothing.predict_batch_top_n(predict_crops, _TOP_K, _BATCH_SIZE)
+                    for meta, top_preds in zip(predict_metas, predictions):
+                        processed = _prediction_result(top_preds, 0.25, "outfit")
+                        x_off, y_off = meta["offset"]
+                        p = meta["person"]
+                        raw_items, final_items = [], []
+                        for source, target in (
+                            (processed["raw_detections"], raw_items),
+                            (processed["final_detections"], final_items),
+                        ):
+                            for det in source:
+                                item = dict(det)
+                                if item.get("bbox"):
+                                    cx1, cy1, cx2, cy2 = item["bbox"]
+                                    item["bbox"] = _clamp_bbox(
+                                        [cx1 + x_off, cy1 + y_off, cx2 + x_off, cy2 + y_off],
+                                        width_cap, height_cap,
                                     )
-                                    db.insert_detection_items(
-                                        detection_id=detection_id,
-                                        items=[
-                                            {
-                                                "item_index": idx + 1,
-                                                "class_name": item.class_name,
-                                                "category": item.category.value if item.category else None,
-                                                "confidence": item.confidence,
-                                                "bbox": _item_bbox_xyxy(item),
-                                            }
-                                            for idx, item in enumerate(stable_items)
-                                        ],
+                                if target is final_items:
+                                    _add_item_colors(frame, item, width_cap, height_cap)
+                                    _apply_detailed_color_with_cache(
+                                        frame, item, width_cap, height_cap,
+                                        int(p["id"]), frame_count,
+                                        1, _detailed_color_cache,
                                     )
-                                
-                                print(f"✅ [Stream {stream_id}] Saved track {our_id} with color: {detection_data['primary_detailed_color']}")
+                                target.append(item)
+                        p["raw_clothing"] = raw_items
+                        p["clothing"] = final_items
+                        p["result_clothing"] = final_items
+                        p["label"] = _class_summary(final_items)
+                        p["stable_clothing"] = _update_track_votes(_vote_history, p["id"], final_items)
+                        p["stable_label"] = p["stable_clothing"]["label"]
+                        p["reid_profile"] = _profile_from_person(p)
+                        _clothing_temporal_cache[int(p["id"])] = {
+                            "frame": frame_count,
+                            "raw_clothing": _copy.deepcopy(raw_items),
+                            "result_clothing": _copy.deepcopy(final_items),
+                        }
 
-                            except Exception as db_error:
-                                print(f"⚠️ [Stream {stream_id}] Database save error: {db_error}")
-                                import traceback
-                                traceback.print_exc()
-                        
-                        # Draw detector bbox
-                        if show_detector_bbox:
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        
-                        # Draw classifier bbox (if different)
-                        if show_classifier_bbox:
-                            for idx, item in enumerate(stable_items):
-                                frame_bbox = _frame_bbox_from_person_relative(item, x1, y1)
-                                if frame_bbox is not None:
-                                    cx1, cy1, cx2, cy2 = frame_bbox
-                                    color = (255, 0, 255) if idx == 0 else (255, 128, 0)
-                                    cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), color, 1)
-                        
-                        # Prepare labels
-                        labels = []
-                        
-                        # Track ID label
-                        if show_detector_track_id and our_id is not None:
-                            labels.append(f"ID:{our_id}")
-                        
-                        # Class name(s) label
-                        if show_classifier_class_name and stable_items:
-                            for idx, item in enumerate(stable_items):
-                                cls_name = item.class_name
-                                conf = item.confidence
-                                if idx == 0:
-                                    labels.append(f"{cls_name} ({conf:.2f})")
-                                else:
-                                    labels.append(f"  {cls_name} ({conf:.2f})")
-                        
-                        # Class count label
-                        if show_classifier_count and stable_items:
-                            labels.append(f"[Classes: {len(stable_items)}]")
-                        
-                        # Draw labels
-                        if labels:
-                            y_offset = y1 - 10
-                            font_scale = 0.5
-                            thickness = 1
-                            
-                            for label in labels:
-                                (text_w, text_h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
-                                
-                                # Background for text
-                                cv2.rectangle(frame, (x1, y_offset - text_h - 4), (x1 + text_w, y_offset + 4), (0, 0, 0), -1)
-                                cv2.putText(frame, label, (x1, y_offset), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness)
-                                
-                                y_offset -= (text_h + 8)
-            except Exception as ai_error:
-                print(f"⚠️ [Stream {stream_id}] AI processing error at frame {frame_count}: {ai_error}")
-                import traceback
-                traceback.print_exc()
-            
+                # ── IoU dedup ─────────────────────────────────────────────
+                persons = _dedupe_persons_by_iou(persons, _IOUthreshold)
+
+                # ── Online ReID ───────────────────────────────────────────
+                _online_reid.update(frame_count, persons)
+
+                # ── JSON accumulation + draw ──────────────────────────────
+                _cur_ids: set[int] = set()
+                for person in persons:
+                    our_id = int(person["id"])
+                    _cur_ids.add(our_id)
+                    x1, y1, x2, y2 = person["bbox"]
+                    result_clothing = person.get("result_clothing") or []
+                    stable_clothing = person.get("stable_clothing") or {}
+                    stable_items_list = stable_clothing.get("items") or result_clothing
+
+                    # JSON accumulation
+                    if save_json_results:
+                        try:
+                            _json_id_last_seen[our_id] = frame_count
+                            if our_id in _json_recovered_ids:
+                                pass
+                            elif our_id in _json_lost_ids:
+                                _json_lost_ids.discard(our_id)
+                                _json_recovered_ids.add(our_id)
+                                _json_flush_pending = True
+                            else:
+                                is_new = our_id not in _json_known_ids
+                                if is_new:
+                                    _json_known_ids.add(our_id)
+                                    _json_id_frame_count[our_id] = 0
+                                    _json_flush_pending = True
+
+                                _saved_img_path: str | None = None
+                                if save_images and _json_image_dir is not None:
+                                    _p_crop = frame[y1:y2, x1:x2]
+                                    if _p_crop.size > 0:
+                                        _id_dir = _json_image_dir / f"id_{our_id}"
+                                        _id_dir.mkdir(parents=True, exist_ok=True)
+                                        _img_name = f"frame{frame_count:06d}.jpg"
+                                        cv2.imwrite(str(_id_dir / _img_name), _p_crop)
+                                        _saved_img_path = str((_id_dir / _img_name).relative_to(_json_out_dir))
+
+                                _person_entry = {
+                                    "id": our_id,
+                                    "original_id": int(person.get("original_id", our_id)),
+                                    "bbox": [x1, y1, x2, y2],
+                                    "confidence": person["confidence"],
+                                    "result_clothing": result_clothing,
+                                    "stable_clothing": stable_clothing,
+                                    "stable_label": person.get("stable_label", ""),
+                                    "reid_recovered": person.get("reid_recovered", False),
+                                }
+                                if _saved_img_path:
+                                    _person_entry["image_path"] = _saved_img_path
+                                _json_frame_persons.setdefault(frame_count, []).append(_person_entry)
+
+                                _sl = person.get("stable_label") or ""
+                                if _sl:
+                                    _json_track_votes[our_id] = {
+                                        "stable_label": _sl,
+                                        "stable_classes": stable_clothing.get("classes") or [],
+                                    }
+
+                                _json_id_frame_count[our_id] += 1
+                                if not is_new and _json_id_frame_count[our_id] % _JSON_BATCH_SIZE == 0:
+                                    _json_flush_pending = True
+                        except Exception:
+                            pass
+
+                    # Draw detector bbox
+                    if show_detector_bbox:
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                    # Draw classifier bbox
+                    if show_classifier_bbox:
+                        for idx, item in enumerate(stable_items_list):
+                            ibbox = item.get("bbox") if isinstance(item, dict) else None
+                            if ibbox:
+                                cx1, cy1, cx2, cy2 = ibbox
+                                color = (255, 0, 255) if idx == 0 else (255, 128, 0)
+                                cv2.rectangle(frame, (cx1, cy1), (cx2, cy2), color, 1)
+
+                    # Labels
+                    labels = []
+                    if show_detector_track_id:
+                        labels.append(f"ID:{our_id}")
+                    if show_classifier_class_name and stable_items_list:
+                        top_n = classifier_top_n if isinstance(classifier_top_n, int) else len(stable_items_list)
+                        for idx, item in enumerate(stable_items_list[:top_n]):
+                            cls_name = item.get("class") if isinstance(item, dict) else getattr(item, "class_name", "")
+                            conf = item.get("confidence") if isinstance(item, dict) else getattr(item, "confidence", 0.0)
+                            prefix = "" if idx == 0 else "  "
+                            labels.append(f"{prefix}{cls_name} ({float(conf):.2f})")
+                    if show_classifier_count and stable_items_list:
+                        labels.append(f"[{len(stable_items_list)}]")
+
+                    if labels:
+                        y_off = y1 - 10
+                        for lbl in labels:
+                            (tw, th), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                            cv2.rectangle(frame, (x1, y_off - th - 4), (x1 + tw, y_off + 4), (0, 0, 0), -1)
+                            cv2.putText(frame, lbl, (x1, y_off), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                            y_off -= (th + 8)
+
+            except Exception:
+                pass
+
+            # ── Post-frame: detect lost IDs + flush ───────────────────────
+            if save_json_results:
+                for _lid in list(_json_known_ids - _json_lost_ids - _json_recovered_ids):
+                    if _lid not in _cur_ids:
+                        _absent = frame_count - _json_id_last_seen.get(_lid, frame_count)
+                        if _absent >= _JSON_ID_LOST_TIMEOUT:
+                            _json_lost_ids.add(_lid)
+                            _json_flush_pending = True
+
+                if _json_flush_pending:
+                    _flush_json_results()
+                    _json_flush_pending = False
+
             # Yield the processed frame
             ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
             if ret:
@@ -1627,14 +1785,49 @@ async def _realtime_analysis_generator(
             if elapsed < frame_time:
                 await asyncio.sleep(frame_time - elapsed)
             last_process_time = current_time
-    except Exception as e:
-        print(f"❌ [Stream {stream_id}] AI processing error at frame {frame_count}: {e}")
-        import traceback
-        traceback.print_exc()
+    except Exception:
+        pass
     finally:
         cap.release()
         _STREAM_ANALYSIS_ACTIVE.pop(stream_id, None)
-        print(f"🛑 [Stream {stream_id}] Stream ended")
+
+        # ── Final flush + register in index.json ──────────────────────────
+        if save_json_results:
+            try:
+                _flush_json_results(final=True)
+
+                # Register / update job in index.json
+                import json as _json
+                from src.config_loader import get_json_storage_index
+                _index_path = Path(get_json_storage_index())
+                if not _index_path.is_absolute():
+                    _index_path = Path.cwd() / _index_path
+                _index_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    _index = _json.loads(_index_path.read_text(encoding="utf-8")) if _index_path.exists() else {}
+                except Exception:
+                    _index = {}
+                if not isinstance(_index.get("jobs"), list):
+                    _index["jobs"] = []
+                _job_record = {
+                    "id": json_job_id,
+                    "label": os.path.basename(video_path),
+                    "source": video_path,
+                    "status": "completed",
+                    "output_dir": json_job_id,
+                    "path": str(_json_out_dir),
+                    "metadata": {"camera_id": effective_camera_id},
+                }
+                _existing = next((j for j in _index["jobs"] if isinstance(j, dict) and j.get("id") == json_job_id), None)
+                if _existing:
+                    _existing.update(_job_record)
+                else:
+                    _index["jobs"].append(_job_record)
+                _itmp = _index_path.with_suffix(".json.tmp")
+                _itmp.write_text(_json.dumps(_index, ensure_ascii=False, indent=2), encoding="utf-8")
+                _itmp.replace(_index_path)
+            except Exception:
+                pass
 
 
 @router.get("/stream-analyze")
@@ -1692,7 +1885,11 @@ async def stream_analyze_video(
         save_images,
         save_bbox_images,
     )
-    
+
+    # In JSON storage mode, automatically save results to prediction_results.json
+    _save_json = get_storage_mode() == "json"
+    _json_job_id = stream_id if _save_json else None
+
     async def _cleanup_wrapper():
         """Wrapper to clean up when stream ends."""
         try:
@@ -1711,11 +1908,13 @@ async def stream_analyze_video(
                 frame_skip=frame_skip,
                 save_images=save_images,
                 save_bbox_images=save_bbox_images,
+                save_json_results=_save_json,
+                json_job_id=_json_job_id,
             ):
                 yield frame
         finally:
             _STREAM_ANALYSIS_ACTIVE.pop(stream_id, None)
-    
+
     return StreamingResponse(
         _cleanup_wrapper(),
         media_type="multipart/x-mixed-replace; boundary=frame",
@@ -1724,6 +1923,7 @@ async def stream_analyze_video(
             "Pragma": "no-cache",
             "Expires": "0",
             "X-Stream-Id": stream_id,
+            "X-Json-Job-Id": _json_job_id or "",
         }
     )
 

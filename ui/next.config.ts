@@ -10,6 +10,12 @@ const nextConfig: NextConfig = {
     ];
   },
   images: {
+    localPatterns: [
+      {
+        pathname: "/api/json/jobs/**",
+        search: "*",
+      },
+    ],
     remotePatterns: [
       {
         protocol: "http",

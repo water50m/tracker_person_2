@@ -171,7 +171,6 @@ def analyze_clothing_colors(
         return default_result
 
     try:
-        print(f"[COLOR] Analyzing clothing crop directly")
 
         # Step 1: Analyze detailed colors (63-color system) on the entire crop
         detailed_colors = analyze_detailed_colors(clothing_crop)
@@ -179,7 +178,6 @@ def analyze_clothing_colors(
         # Log dominant colors
         dominant_colors = sorted(detailed_colors.items(), key=lambda x: x[1], reverse=True)[:3]
         dominant_color_names = [f"{name}({pct:.1f}%)" for name, pct in dominant_colors]
-        print(f"[COLOR] Dominant colors: {dominant_color_names}")
 
         # Step 2: Get primary detailed color
         primary_detailed_color = get_primary_detailed_color(detailed_colors)

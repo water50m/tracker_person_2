@@ -13,8 +13,8 @@ python start_dev.py
 
 Or start individually:
 ```bash
-# Backend (FastAPI)
-python -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
+# Backend (FastAPI) — use venv python and set UTF-8 for Thai locale Windows
+$env:PYTHONUTF8 = "1"; .\venv\Scripts\python.exe -m uvicorn src.api.main:app --host 127.0.0.1 --port 8000 --reload
 
 # Frontend (Next.js)
 cd ui && npm run dev

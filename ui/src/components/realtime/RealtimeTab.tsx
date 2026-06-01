@@ -325,8 +325,8 @@ export default function RealtimeTab() {
           formData.append("display_mode", "background");
           formData.append("priority", queuePriority.toString());
           formData.append("save_to_db", isJsonMode ? "false" : "true");
-          formData.append("save_images", isJsonMode ? "false" : "true");
-          formData.append("save_bbox_images", isJsonMode ? "false" : "true");
+          formData.append("save_images", String(saveImages));
+          formData.append("save_bbox_images", String(saveBboxImages));
           formData.append("frame_skip", "5");
 
           const response = await fetch(`${queueBase}/upload-add`, {
@@ -1452,10 +1452,22 @@ export default function RealtimeTab() {
         <SettingsCard title="DISPLAY OPTIONS">
           <div className="space-y-4">
             {isJsonMode ? (
-              <div className="border border-slate-700/60 bg-slate-900/40 px-3 py-2 rounded-sm">
-                <span className="font-mono text-xs text-slate-400">Storage</span>
-                <p className="font-mono text-xs text-yellow-400 mt-1">JSON mode saves local result files only</p>
-              </div>
+              <>
+                <div className="border border-slate-700/60 bg-slate-900/40 px-3 py-2 rounded-sm">
+                  <span className="font-mono text-xs text-slate-400">Storage</span>
+                  <p className="font-mono text-xs text-yellow-400 mt-1">JSON mode — results saved to local files</p>
+                </div>
+                <div className="border-t border-slate-800/40 pt-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-xs text-slate-400">Save Person Crop Images</span>
+                    <Toggle label="SAVE IMAGES" value={saveImages} onChange={setSaveImages} />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-xs text-slate-400">Save BBox Frame Images</span>
+                    <Toggle label="SAVE BBOX" value={saveBboxImages} onChange={setSaveBboxImages} />
+                  </div>
+                </div>
+              </>
             ) : (
               <div className="flex items-center justify-between">
                 <span className="font-mono text-xs text-slate-400">Save Detection Data</span>

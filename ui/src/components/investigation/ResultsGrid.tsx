@@ -145,36 +145,13 @@ function ResultCard({
   index: number;
   onClick: () => void;
 }) {
-  const [hovered, setHovered] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const conf = confidenceColor(result.confidence);
-  // Use all_top_colors from new API, fallback to top_colors for backward compatibility
   const topColors = result.all_top_colors || result.top_colors || [];
   const items = result.items || [];
-  const camColor = CAMERA_COLORS[result.camera_id] ?? "text-slate-400";
+
   const thumbnailUrl = typeof result.thumbnail_url === "string" ? result.thumbnail_url : "";
   const hasThumbnail = thumbnailUrl && thumbnailUrl.trim().length > 0;
-  const { openTrace } = useInvestigation();
-
-  const openVideoPlayer = () => {
-    // Get video info from result and navigate to search page
-    const videoId = result.video_id;
-    const timeOffset = result.video_time_offset;
-
-    if (videoId) {
-      // Navigate to search page with video info
-      const params = new URLSearchParams({
-        video: videoId,
-        time: timeOffset?.toString() || "0"
-      });
-      window.open(`/search?${params.toString()}`, '_blank');
-    } else {
-      alert('No video available for this detection');
-    }
-  };
-
-
-
   return (
     <div
       className="relative group cursor-pointer rounded-sm overflow-hidden border border-slate-800/60
@@ -185,8 +162,6 @@ function ResultCard({
         animationDelay: `${Math.min(index * 30, 300)}ms`,
         animation: "fade-in 0.3s ease-out forwards",
       }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
       onClick={onClick}
     >
       {/* Thumbnail */}
@@ -198,7 +173,7 @@ function ResultCard({
               src={thumbnailUrl}
               alt={result.clothing_class}
               fill
-              className={`object-cover transition-all duration-300 ${loaded ? "opacity-100" : "opacity-0"} ${hovered ? "scale-105" : "scale-100"}`}
+              className={`object-cover transition-all duration-300 ${loaded ? "opacity-100" : "opacity-0"}`}
               onLoad={() => setLoaded(true)}
               unoptimized
             />
@@ -218,112 +193,64 @@ function ResultCard({
         }}
       />
 
-      {/* Confidence badge (top-right) */}
-      <div className={`absolute top-1 right-1 px-1 py-0.5 rounded-sm border font-mono text-[8px] font-bold ${conf.text} ${conf.bg} ${conf.border}`}>
-        {Math.round(result.confidence * 100)}%
-      </div>
-
-      {/* Color badges (top-left) */}
-      <div className="absolute top-1 left-1 flex gap-0.5">
-        {topColors.slice(0, 3).map((color: any, idx: number) => {
-          const colorName = color.name;
-          const colorHex = COLOR_HEX_MAP[colorName] || "#94a3b8";
-          const percentage = color.percentage;
-          return (
-            <div
-              key={idx}
-              className="w-2 h-2 rounded-full bg-slate-950/70"
-              style={{ backgroundColor: colorHex }}
-              title={`${colorName}: ${Math.round(percentage)}%`}
-            />
-          );
-        })}
-      </div>
-
-      {/* Hover overlay */}
-      <div
-        className={`absolute inset-0 flex flex-col justify-end p-1.5 transition-all duration-200
-          ${hovered
-            ? "bg-gradient-to-t from-slate-950/95 via-slate-950/60 to-transparent opacity-100"
-            : "opacity-0 bg-gradient-to-t from-slate-950/80 to-transparent"
-          }`}
-      >
-        {/* Multi-item badges */}
-        <div className="flex flex-wrap gap-1 mb-1">
-          {items.length > 0 ? (
-            items.map((item) => (
-              <span
-                key={item.id}
-                className={`px-1.5 py-0.5 rounded-sm font-mono text-[8px] font-bold truncate
-                  ${item.category === "TOP"
-                    ? "bg-cyan-900/60 text-cyan-300 border border-cyan-700/60"
-                    : "bg-emerald-900/60 text-emerald-300 border border-emerald-700/60"
-                  }`}
-              >
-                {item.class_name}
-              </span>
-            ))
-          ) : (
-            <span className="font-mono text-[9px] text-slate-200 font-bold truncate">
-              {result.clothing_class}
-            </span>
-          )}
+      {/* Track ID (top-left) */}
+      {result.track_id != null && (
+        <div className="absolute top-1 left-1 px-1 py-0.5 rounded-sm bg-slate-950/70 border border-slate-700/60 font-mono text-[8px] font-bold text-slate-300">
+          #{result.track_id}
         </div>
-        {/* Color summary */}
-        <div className="flex flex-wrap gap-1 text-[8px] text-slate-400">
+      )}
+
+      {/* Frame number (top-right) */}
+      {result.frame != null && (
+        <div className="absolute top-1 right-1 px-1 py-0.5 rounded-sm bg-slate-950/70 border border-slate-700/60 font-mono text-[8px] font-bold text-slate-300">
+          f{result.frame}
+        </div>
+      )}
+
+      {/* Bottom overlay: class + color — always visible */}
+      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-950/90 via-slate-950/60 to-transparent pt-4 pb-1.5 px-1.5">
+        <div className="flex flex-col gap-0.5">
           {items.length > 0 ? (
-            items.map((item, idx) => (
-              <span key={item.id} className="truncate">
-                {idx > 0 && "/ "}
-                <span style={{ color: COLOR_HEX_MAP[item.colors?.primary_color] || "#94a3b8" }}>
-                  ● {item.colors?.primary_color || "Unknown"}
+            items.slice(0, 2).map((item) => (
+              <div key={item.id} className="flex items-center gap-1 min-w-0">
+                <span className="font-mono text-[7px] font-bold text-white/90 shrink-0">
+                  {item.class_name}
                 </span>
-              </span>
+                <div className="flex gap-0.5 flex-wrap">
+                  {(item.colors?.top_colors || []).map((c: any, i: number) => (
+                    <div
+                      key={i}
+                      className="w-2 h-2 rounded-full ring-1 ring-black/40"
+                      style={{ backgroundColor: COLOR_HEX_MAP[c.name] || "#94a3b8" }}
+                      title={`${c.name}: ${Math.round(c.percentage)}%`}
+                    />
+                  ))}
+                </div>
+              </div>
             ))
           ) : (
-            <span style={{ color: result.color.toLowerCase() === "white" ? "#94a3b8" : result.color.toLowerCase() }}>
-              ● {result.color}
-            </span>
+            <div className="flex items-center gap-1 min-w-0">
+              <span className="font-mono text-[7px] font-bold text-white/90 shrink-0">
+                {result.clothing_class}
+              </span>
+              <div className="flex gap-0.5 flex-wrap">
+                {topColors.map((c: any, i: number) => (
+                  <div
+                    key={i}
+                    className="w-2 h-2 rounded-full ring-1 ring-black/40"
+                    style={{ backgroundColor: COLOR_HEX_MAP[c.name] || "#94a3b8" }}
+                    title={`${c.name}: ${Math.round(c.percentage)}%`}
+                  />
+                ))}
+              </div>
+            </div>
           )}
         </div>
-        <div className="font-mono text-[7px] text-slate-500 mt-0.5">
+        <div className="font-mono text-[6px] text-slate-500 mt-0.5">
           {formatDate(result.timestamp)} {formatTime(result.timestamp)}
         </div>
-
-        {/* Action buttons */}
-        {hovered && (
-          <div className="mt-1 flex gap-1">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                openTrace(result);
-              }}
-              className="flex-1 py-0.5 bg-cyan-950/60 border border-cyan-700/60 rounded-sm
-                font-mono text-[8px] text-cyan-400 hover:bg-cyan-900/60 transition-colors"
-            >
-              TRACE
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                openVideoPlayer();
-              }}
-              className="flex-1 py-0.5 bg-purple-950/60 border border-purple-700/60 rounded-sm
-                font-mono text-[8px] text-purple-400 hover:bg-purple-900/60 transition-colors"
-            >
-              VIDEO
-            </button>
-          </div>
-        )}
       </div>
 
-      {/* Corner decoration on hover */}
-      {hovered && (
-        <>
-          <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-cyan-400 pointer-events-none" />
-          <div className="absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 border-cyan-400 pointer-events-none" />
-        </>
-      )}
     </div>
   );
 }

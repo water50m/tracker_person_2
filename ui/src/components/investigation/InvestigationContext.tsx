@@ -480,20 +480,12 @@ export function InvestigationProvider({ children }: { children: React.ReactNode 
       if (!res.ok) throw new Error("Detection failed");
       const result: AttributeDetectionResult = await res.json();
 
-      // Log API response
-      console.log("[CONTEXT] API response received:", result);
-      console.log("[CONTEXT] detected_attributes:", result.detected_attributes);
-      console.log("[CONTEXT] all_items:", result.all_items);
-
       dispatch({ type: "AUTOFILL_SUCCESS", payload: result });
 
       // ── Auto-apply detected attributes to filters ──
-      // Extract from detected_attributes (API response structure)
       const detectedClass = result.detected_attributes?.class_name;
       const detectedColor = result.detected_attributes?.color_name;
       const allItems = result.all_items || [];
-
-      console.log("[CONTEXT] Parsed detected_class:", detectedClass, "detected_color:", detectedColor, "all_items count:", allItems.length);
       
       // Get unique colors from all_items
       const uniqueColors = [...new Set(

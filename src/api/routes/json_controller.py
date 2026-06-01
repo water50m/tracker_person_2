@@ -524,6 +524,36 @@ async def get_json_summary(job_id: str):
     return summary_path.read_text(encoding="utf-8")
 
 
+@router.get("/jobs/{job_id}/video")
+async def get_json_job_video(job_id: str):
+    """Serve the source video file for a JSON job (supports range requests for seeking)."""
+    job_path = _job_dir(job_id)
+
+    # Resolve video path from prediction_results.json metadata
+    source: str | None = None
+    results_file = job_path / "prediction_results.json"
+    if results_file.exists():
+        try:
+            import json as _j
+            data = _j.loads(results_file.read_text(encoding="utf-8"))
+            meta = data.get("metadata") if isinstance(data, dict) else None
+            if isinstance(meta, dict):
+                source = str(meta.get("source_video") or "").strip() or None
+        except Exception:
+            pass
+
+    if source and Path(source).exists():
+        return FileResponse(source, media_type="video/mp4")
+
+    # Fallback: find any video file in the job directory
+    for ext in ("*.mp4", "*.avi", "*.mov", "*.mkv"):
+        matches = list(job_path.glob(ext))
+        if matches:
+            return FileResponse(str(matches[0]), media_type="video/mp4")
+
+    raise HTTPException(status_code=404, detail="Source video not found for this job")
+
+
 @router.get("/jobs/{job_id}/files/{file_path:path}")
 async def get_json_job_file(job_id: str, file_path: str):
     job_path = _job_dir(job_id)
@@ -531,3 +561,95 @@ async def get_json_job_file(job_id: str, file_path: str):
     if not path.exists() or not path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(path)
+
+
+@router.get("/jobs/{job_id}/frame-crop")
+async def get_frame_crop(
+    job_id: str,
+    frame: int = Query(..., ge=0, description="Frame number (0-based)"),
+    x1: float = Query(..., description="Bounding box left (pixels)"),
+    y1: float = Query(..., description="Bounding box top (pixels)"),
+    x2: float = Query(..., description="Bounding box right (pixels)"),
+    y2: float = Query(..., description="Bounding box bottom (pixels)"),
+    padding: float = Query(0.15, ge=0.0, le=0.5, description="Fractional padding around bbox"),
+):
+    """
+    Seek to a specific frame in the source video, crop the bounding-box region
+    (with optional padding), and return the result as image/jpeg.
+
+    The source video path is resolved from:
+      1. prediction_results.json → metadata.source_video / metadata.source
+      2. index.json → jobs[].source  (fallback)
+    """
+    import cv2
+    from fastapi.responses import Response as FastAPIResponse
+
+    job_path = _job_dir(job_id)
+
+    # ── 1. Locate the source video ─────────────────────────────────────────
+    source: str | None = None
+
+    # Try prediction_results.json metadata first
+    results_file = job_path / "prediction_results.json"
+    if results_file.exists():
+        try:
+            data = json.loads(results_file.read_text(encoding="utf-8"))
+            meta = data.get("metadata") if isinstance(data, dict) else None
+            if isinstance(meta, dict):
+                source = str(meta.get("source_video") or meta.get("source") or "").strip() or None
+        except Exception:
+            pass
+
+    # Fallback: index.json
+    if not source:
+        try:
+            index = _load_index()
+            for job in index.get("jobs", []):
+                if isinstance(job, dict) and job.get("id") == job_id:
+                    source = str(job.get("source") or "").strip() or None
+                    break
+        except Exception:
+            pass
+
+    if not source or not Path(source).exists():
+        raise HTTPException(status_code=404, detail=f"Source video not found for job {job_id!r}")
+
+    # ── 2. Open video and read the requested frame ─────────────────────────
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        raise HTTPException(status_code=500, detail=f"Cannot open video: {source}")
+
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, float(frame))
+        ret, img = cap.read()
+        if not ret or img is None:
+            raise HTTPException(status_code=404, detail=f"Frame {frame} not readable from video")
+    finally:
+        cap.release()
+
+    # ── 3. Crop with padding ───────────────────────────────────────────────
+    h, w = img.shape[:2]
+    bw = max(x2 - x1, 1.0)
+    bh = max(y2 - y1, 1.0)
+    pad_x = bw * padding
+    pad_y = bh * padding
+
+    cx1 = max(0, int(x1 - pad_x))
+    cy1 = max(0, int(y1 - pad_y))
+    cx2 = min(w, int(x2 + pad_x))
+    cy2 = min(h, int(y2 + pad_y))
+
+    crop = img[cy1:cy2, cx1:cx2]
+    if crop.size == 0:
+        raise HTTPException(status_code=400, detail="Bounding box produces an empty crop region")
+
+    # ── 4. Encode and return ───────────────────────────────────────────────
+    ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to encode crop as JPEG")
+
+    return FastAPIResponse(
+        content=buf.tobytes(),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},  # cache 1 day — frame is immutable
+    )

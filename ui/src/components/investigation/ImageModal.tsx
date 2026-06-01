@@ -58,15 +58,16 @@ export default function ImageModal() {
   const dragRef = useRef<{ isDragging: boolean; startX: number; startY: number; initialLeft: number; initialTop: number } | null>(null);
 
   // Mini player state
-  const [playerPosition, setPlayerPosition] = useState({ x: 20, y: 20 }); // bottom-left default (x from left, y from bottom)
-  const [playerSize, setPlayerSize] = useState<'small' | 'medium' | 'large' | 'custom'>('large');
+  const [playerPosition, setPlayerPosition] = useState({ left: 20, top: 20 });
   const [isMinimized, setIsMinimized] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
-
-  // Custom dimensions for mouse resize
-  const [playerDimensions, setPlayerDimensions] = useState({ width: 480, height: 270 });
-  const resizeRef = useRef<{ isResizing: boolean; startX: number; startY: number; initialWidth: number; initialHeight: number } | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playerDimensions, setPlayerDimensions] = useState({ width: 480, height: 300 });
+  const resizeRef = useRef<{
+    dir: string; startX: number; startY: number;
+    initW: number; initH: number; initL: number; initT: number;
+  } | null>(null);
 
   const [imgUrl, setImgUrl] =  useState('');
   
@@ -104,10 +105,7 @@ export default function ImageModal() {
 
   // Initialize targetOffset from API
   useEffect(() => {
-    console.log('[ImageModal] detectionDetail:', detectionDetail);
-    console.log('[ImageModal] video_time_offset:', detectionDetail?.video_time_offset);
     if (detectionDetail?.video_time_offset !== undefined) {
-      console.log('[ImageModal] Setting targetOffset to:', Number(detectionDetail.video_time_offset));
       setTargetOffset(Number(detectionDetail.video_time_offset));
       setShowVideo(true);
     }
@@ -130,11 +128,11 @@ export default function ImageModal() {
 
   const handleDragMove = useCallback((e: MouseEvent) => {
     if (!dragRef.current?.isDragging) return;
-    const dx = dragRef.current.startX - e.clientX;
+    const dx = e.clientX - dragRef.current.startX;
     const dy = e.clientY - dragRef.current.startY;
     setPlayerPosition({
-      x: Math.max(0, Math.min(window.innerWidth - 320, dragRef.current.initialLeft + dx)),
-      y: Math.max(0, Math.min(window.innerHeight - 200, dragRef.current.initialTop + dy)),
+      left: Math.max(0, Math.min(window.innerWidth - 200, dragRef.current.initialLeft + dx)),
+      top: Math.max(0, Math.min(window.innerHeight - 40, dragRef.current.initialTop + dy)),
     });
   }, []);
 
@@ -144,12 +142,25 @@ export default function ImageModal() {
   }, []);
 
   const handleResizeMove = useCallback((e: MouseEvent) => {
-    if (!resizeRef.current?.isResizing) return;
-    const dx = e.clientX - resizeRef.current.startX;
-    const dy = e.clientY - resizeRef.current.startY;
-    setPlayerDimensions({
-      width: Math.max(200, Math.min(window.innerWidth - 100, resizeRef.current.initialWidth + dx)),
-      height: Math.max(120, Math.min(window.innerHeight - 100, resizeRef.current.initialHeight + dy)),
+    if (!resizeRef.current) return;
+    const { dir, startX, startY, initW, initH, initL, initT } = resizeRef.current;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    const minW = 280, minH = 180;
+
+    setPlayerDimensions(prev => {
+      let w = prev.width, h = prev.height;
+      if (dir.includes('e')) w = Math.max(minW, initW + dx);
+      if (dir.includes('s')) h = Math.max(minH, initH + dy);
+      if (dir.includes('w')) w = Math.max(minW, initW - dx);
+      if (dir.includes('n')) h = Math.max(minH, initH - dy);
+      return { width: w, height: h };
+    });
+    setPlayerPosition(prev => {
+      let l = prev.left, t = prev.top;
+      if (dir.includes('w')) l = Math.max(0, initL + dx);
+      if (dir.includes('n')) t = Math.max(0, initT + dy);
+      return { left: l, top: t };
     });
   }, []);
 
@@ -256,73 +267,57 @@ export default function ImageModal() {
   // ----- Mini Player Drag & Resize -----
 
   const handleDragStart = (e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('.mini-player-controls')) return;
     e.preventDefault();
     setIsDragging(true);
     dragRef.current = {
       isDragging: true,
       startX: e.clientX,
       startY: e.clientY,
-      initialLeft: playerPosition.x,
-      initialTop: playerPosition.y,
+      initialLeft: playerPosition.left,
+      initialTop: playerPosition.top,
     };
   };
 
-  // ----- Resize Handlers -----
-
-  const handleResizeStart = (e: React.MouseEvent) => {
+  const handleResizeStart = (dir: string) => (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setIsResizing(true);
-    setPlayerSize('custom');
     resizeRef.current = {
-      isResizing: true,
+      dir,
       startX: e.clientX,
       startY: e.clientY,
-      initialWidth: playerDimensions.width,
-      initialHeight: playerDimensions.height,
+      initW: playerDimensions.width,
+      initH: playerDimensions.height,
+      initL: playerPosition.left,
+      initT: playerPosition.top,
     };
   };
 
-  const toggleMinimize = () => {
-    setIsMinimized(prev => !prev);
+  const togglePlay = () => {
+    if (!popupVideoRef.current) return;
+    if (popupVideoRef.current.paused) {
+      popupVideoRef.current.play().catch(() => {});
+      setIsPlaying(true);
+    } else {
+      popupVideoRef.current.pause();
+      setIsPlaying(false);
+    }
   };
 
-  const cycleSize = () => {
-    setPlayerSize(prev => {
-      if (prev === 'small') {
-        setPlayerDimensions({ width: 320, height: 180 });
-        return 'medium';
-      }
-      if (prev === 'medium') {
-        setPlayerDimensions({ width: 480, height: 270 });
-        return 'large';
-      }
-      setPlayerDimensions({ width: 240, height: 135 });
-      return 'small';
-    });
-  };
-
-  const getPlayerStyle = () => {
-    if (isMinimized) {
-      const minWidths = { small: 200, medium: 240, large: 320, custom: Math.max(200, playerDimensions.width) };
-      return { width: minWidths[playerSize], height: 36 };
-    }
-    if (playerSize === 'custom') {
-      return { width: playerDimensions.width, height: playerDimensions.height };
-    }
-    const sizes = {
-      small: { width: 240, height: 135 },
-      medium: { width: 320, height: 180 },
-      large: { width: 480, height: 270 },
-    };
-    return sizes[playerSize as keyof typeof sizes] || sizes.large;
-  };
+  const toggleMinimize = () => setIsMinimized(prev => !prev);
 
   const resetOffset = () => {
-    if (detectionDetail?.video_time_offset !== undefined) {
-      setTargetOffset(Number(detectionDetail.video_time_offset));
-    }
+    const original = detectionDetail?.video_time_offset;
+    if (original === undefined) return;
+    const t = Number(original);
+    setTargetOffset(t);
+    // Seek both video elements and play
+    [popupVideoRef.current, videoRef.current].forEach(v => {
+      if (!v) return;
+      v.currentTime = t;
+      v.play().catch(() => {});
+    });
+    setIsPlaying(true);
   };
 
   // Color analysis helper - get all colors from items
@@ -673,121 +668,20 @@ export default function ImageModal() {
                     </div>
                   </div>
 
-                  {/* Video Section */}
+                  {/* Open Video */}
                   {detectionDetail?.video_id && (
-                    <div className="bg-slate-900/60 rounded-lg border border-slate-800 overflow-hidden">
-                      <div className="px-3 py-2 bg-purple-950/20 border-b border-purple-800/40 flex items-center justify-between">
-                        <span className="font-mono text-xs text-purple-300 uppercase tracking-wider">Video Playback</span>
-                        <button
-                          onClick={() => setShowVideo(!showVideo)}
-                          className="font-mono text-xs text-slate-400 hover:text-white transition-colors"
-                        >
-                          {showVideo ? 'Hide' : 'Show'}
-                        </button>
-                      </div>
-                      
-                      {showVideo && (
-                        <div className="p-3 space-y-3">
-                          {/* Video Player */}
-                          <div className="relative aspect-video bg-black rounded overflow-hidden">
-                            <video
-                              ref={videoRef}
-                              controls
-                              className="w-full h-full"
-                              src={`/api/video/videos/${detectionDetail.video_id}/stream`}
-                              onLoadedMetadata={() => {
-                                if (videoRef.current && detectionDetail?.video_time_offset !== undefined) {
-                                  videoRef.current.currentTime = Number(detectionDetail.video_time_offset);
-                                }
-                              }}
-                            />
-                          </div>
-
-                          {/* Time Controls */}
-                          <div className="space-y-2">
-                            <div className="flex items-center justify-between">
-                              <span className="font-mono text-xs text-slate-500">Target Offset</span>
-                              <span className="font-mono text-lg font-bold text-purple-400">{targetOffset.toFixed(2)}s</span>
-                            </div>
-                            
-                            <div className="flex items-center gap-2">
-                              <button
-                                onClick={() => adjustOffset(-1)}
-                                className="px-3 py-1.5 bg-slate-800 text-slate-300 font-mono text-xs font-bold rounded hover:bg-slate-700 transition-colors border border-slate-700"
-                              >
-                                -1s
-                              </button>
-                              <button
-                                onClick={resetOffset}
-                                className="flex-1 py-1.5 bg-purple-900/40 text-purple-400 font-mono text-xs font-bold tracking-wider rounded hover:bg-purple-800/60 transition-colors border border-purple-700/50"
-                              >
-                                RESET
-                              </button>
-                              <button
-                                onClick={() => adjustOffset(1)}
-                                className="px-3 py-1.5 bg-slate-800 text-slate-300 font-mono text-xs font-bold rounded hover:bg-slate-700 transition-colors border border-slate-700"
-                              >
-                                +1s
-                              </button>
-                            </div>
-
-                            <button
-                              onClick={jumpToTargetOffset}
-                              className="w-full py-2 bg-purple-600/30 text-purple-300 font-mono text-xs font-bold tracking-wider rounded hover:bg-purple-600/50 transition-colors border border-purple-500/50 flex justify-center items-center gap-2"
-                            >
-                              <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
-                                <path d="M8 5v14l11-7z" />
-                              </svg>
-                              PLAY AT OFFSET
-                            </button>
-                          </div>
-                        </div>
-                      )}
-
-                      {!showVideo && (
-                        <div className="p-4 text-center">
-                          <button
-                            onClick={() => setShowVideo(true)}
-                            className="px-4 py-2 bg-purple-600/30 text-purple-300 font-mono text-xs font-bold rounded hover:bg-purple-600/50 transition-colors border border-purple-500/50"
-                          >
-                            Load Video
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Action Buttons */}
-                  <div className="flex gap-2 pt-2">
                     <button
-                      onClick={handleOpenTrace}
-                      className="flex-1 py-3 bg-cyan-950/60 border border-cyan-700/60 rounded-lg
-                        font-mono text-xs font-bold tracking-wider text-cyan-400 hover:bg-cyan-900/60 transition-colors"
+                      onClick={openVideoPopup}
+                      className="w-full py-3 bg-purple-600/30 border border-purple-500/50 rounded-lg
+                        font-mono text-xs font-bold tracking-wider text-purple-300
+                        hover:bg-purple-600/50 transition-colors flex items-center justify-center gap-2"
                     >
-                      TRACE PERSON
+                      <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
+                        <path d="M8 5v14l11-7z"/>
+                      </svg>
+                      OPEN VIDEO
                     </button>
-                    {detectionDetail?.video_id && (
-                      <button
-                        onClick={() => {
-                          const params = new URLSearchParams({
-                            video: detectionDetail.video_id,
-                            time: targetOffset.toString(),
-                            timestamp: detectionDetail?.timestamp || imageTarget.timestamp,
-                            camera_id: detectionDetail?.camera_id || imageTarget.camera_id,
-                            clothing_class: detectionDetail?.class_name || imageTarget.clothing_class,
-                            color: detectionDetail?.category || imageTarget.color,
-                            confidence: (detectionDetail?.confidence || imageTarget.confidence)?.toString() || "0",
-                            play: "true"
-                          });
-                          window.open(`/search?${params.toString()}`, '_blank');
-                        }}
-                        className="flex-1 py-3 bg-purple-950/60 border border-purple-700/60 rounded-lg
-                          font-mono text-xs font-bold tracking-wider text-purple-400 hover:bg-purple-900/60 transition-colors"
-                      >
-                        OPEN IN SEARCH
-                      </button>
-                    )}
-                  </div>
+                  )}
                 </div>
               )}
             </div>
@@ -795,144 +689,108 @@ export default function ImageModal() {
         </div>
       </div>
 
-      {/* Mini Player */}
+      {/* ── Mini Player (desktop-style resizable window) ── */}
       {videoPopupOpen && detectionDetail?.video_id && (
         <div
           ref={miniPlayerRef}
-          className={`fixed z-[60] bg-slate-900 rounded-lg border border-slate-700 shadow-2xl overflow-hidden transition-all duration-200 ${isDragging ? 'cursor-grabbing' : isResizing ? 'cursor-se-resize' : 'cursor-grab'}`}
+          className="fixed z-[60] bg-slate-900 border border-slate-600 shadow-2xl select-none"
           style={{
-            left: `${playerPosition.x}px`,
-            right: 'auto',
-            bottom: `${playerPosition.y}px`,
-            top: 'auto',
-            width: getPlayerStyle().width,
-            height: getPlayerStyle().height,
+            left: playerPosition.left,
+            top: playerPosition.top,
+            width: playerDimensions.width,
+            height: isMinimized ? 36 : playerDimensions.height,
+            minWidth: 280,
+            minHeight: isMinimized ? 36 : 180,
           }}
         >
-          {/* Draggable Header Bar */}
+          {/* ── Title bar (drag handle) ── */}
           <div
-            className="mini-player-controls flex items-center justify-between px-3 py-2 bg-slate-950/80 border-b border-slate-800 select-none"
+            className="flex items-center justify-between h-9 px-2 bg-slate-950 border-b border-slate-700 cursor-move"
             onMouseDown={handleDragStart}
           >
-            <div className="flex items-center gap-2">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4 text-slate-500">
-                <path d="M4 8h16M4 16h16" />
-              </svg>
-              <span className="font-mono text-xs text-slate-400">Offset: {targetOffset.toFixed(2)}s</span>
+            {/* Left: offset */}
+            <div className="flex items-center gap-1.5">
+              <span className="font-mono text-[11px] text-slate-400">Offset: <span className="text-purple-400">{targetOffset.toFixed(2)}s</span></span>
             </div>
-            <div className="flex items-center gap-1">
-              {/* Size toggle */}
-              <button
-                onClick={cycleSize}
-                className="p-1.5 rounded text-slate-500 hover:text-slate-300 hover:bg-slate-800 transition-colors"
-                title="Toggle size"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-                  <path d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
-                </svg>
+
+            {/* Right: window controls */}
+            <div className="flex items-center" onMouseDown={e => e.stopPropagation()}>
+              <button onClick={toggleMinimize} className="w-7 h-7 flex items-center justify-center text-slate-500 hover:text-white hover:bg-slate-700 transition-colors" title={isMinimized ? "Restore" : "Minimize"}>
+                {isMinimized
+                  ? <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/></svg>
+                  : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5"><path d="M18 12H6"/></svg>
+                }
               </button>
-              {/* Minimize toggle */}
-              <button
-                onClick={toggleMinimize}
-                className="p-1.5 rounded text-slate-500 hover:text-slate-300 hover:bg-slate-800 transition-colors"
-                title={isMinimized ? "Expand" : "Minimize"}
-              >
-                {isMinimized ? (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-                    <path d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
-                  </svg>
-                ) : (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-                    <path d="M18 12H6" />
-                  </svg>
-                )}
-              </button>
-              {/* Close */}
-              <button
-                onClick={closeVideoPopup}
-                className="p-1.5 rounded text-slate-500 hover:text-red-400 hover:bg-red-950/30 transition-colors"
-                title="Close"
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
-                  <path d="M18 6L6 18M6 6l12 12" />
-                </svg>
+              <button onClick={closeVideoPopup} className="w-7 h-7 flex items-center justify-center text-slate-500 hover:text-white hover:bg-red-700 transition-colors" title="Close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3.5 h-3.5"><path d="M18 6L6 18M6 6l12 12"/></svg>
               </button>
             </div>
           </div>
 
-          {/* Video Player (hidden when minimized) */}
+          {/* ── Video + controls ── */}
           {!isMinimized && (
-            <>
-              <div className="relative bg-black flex-1" style={{ height: `calc(100% - 80px)` }}>
+            <div className="flex flex-col" style={{ height: 'calc(100% - 36px)' }}>
+              {/* Video */}
+              <div className="flex-1 bg-black overflow-hidden">
                 <video
                   ref={popupVideoRef}
                   controls
-                  autoPlay
                   className="w-full h-full"
-                  src={`/api/video/videos/${detectionDetail.video_id}/stream`}
+                  src={detectionDetail.storage_mode === "json"
+                    ? `/api/json/jobs/${detectionDetail.video_id}/video`
+                    : `/api/video/videos/${detectionDetail.video_id}/stream`}
                   onLoadedMetadata={() => {
                     if (popupVideoRef.current) {
                       popupVideoRef.current.currentTime = targetOffset;
-                      popupVideoRef.current.play().catch(() => {});
                     }
                   }}
+                  onPlay={() => setIsPlaying(true)}
+                  onPause={() => setIsPlaying(false)}
                 />
               </div>
 
-              {/* Controls */}
-              <div className="absolute bottom-0 left-0 right-0 px-3 py-2 bg-slate-950/90 border-t border-slate-800 mini-player-controls">
-                <div className="flex items-center justify-between gap-2">
-                  <button
-                    onClick={() => adjustOffset(-1)}
-                    className="px-2 py-1 bg-slate-800 text-slate-300 font-mono text-xs font-bold rounded hover:bg-slate-700 transition-colors border border-slate-700"
-                  >
-                    -1s
-                  </button>
-
-                  <div className="flex-1 text-center">
-                    <span className="font-mono text-xs text-slate-500 uppercase block">Offset</span>
-                    <span className="font-mono text-sm font-bold text-purple-400">{targetOffset.toFixed(2)}s</span>
-                  </div>
-
-                  <button
-                    onClick={() => adjustOffset(1)}
-                    className="px-2 py-1 bg-slate-800 text-slate-300 font-mono text-xs font-bold rounded hover:bg-slate-700 transition-colors border border-slate-700"
-                  >
-                    +1s
-                  </button>
+              {/* Offset bar */}
+              <div className="flex flex-col gap-1 px-2 py-1.5 bg-slate-950/80 border-t border-slate-800">
+                <div className="flex items-center gap-1.5">
+                  <button onClick={() => adjustOffset(-1)} className="px-2 py-0.5 bg-slate-800 border border-slate-700 font-mono text-[10px] text-slate-300 hover:bg-slate-700 rounded">-1s</button>
+                  <button onClick={resetOffset} className="flex-1 py-0.5 bg-slate-800/60 border border-slate-700 font-mono text-[10px] text-slate-400 hover:bg-slate-700 rounded tracking-widest">RESET</button>
+                  <button onClick={() => adjustOffset(1)} className="px-2 py-0.5 bg-slate-800 border border-slate-700 font-mono text-[10px] text-slate-300 hover:bg-slate-700 rounded">+1s</button>
                 </div>
-
                 <button
-                  onClick={resetOffset}
-                  className="w-full mt-2 py-1 bg-slate-800/50 text-slate-400 font-mono text-[10px] font-bold tracking-wider rounded hover:bg-slate-700/50 transition-colors border border-slate-700/50"
+                  onClick={togglePlay}
+                  className={`w-full py-1 rounded font-mono text-[10px] font-bold tracking-widest flex items-center justify-center gap-1.5 border transition-colors
+                    ${isPlaying
+                      ? "bg-purple-900/60 border-purple-700/60 text-purple-300 hover:bg-purple-800/60"
+                      : "bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700"
+                    }`}
                 >
-                  RESET
+                  {isPlaying ? (
+                    <><svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>PAUSE</>
+                  ) : (
+                    <><svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3"><path d="M8 5v14l11-7z"/></svg>PLAY</>
+                  )}
                 </button>
               </div>
-            </>
-          )}
-
-          {/* Resize Handle - bottom right corner */}
-          {!isMinimized && (
-            <div
-              className="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize z-10 group"
-              onMouseDown={handleResizeStart}
-            >
-              {/* Resize indicator lines */}
-              <svg
-                className="absolute bottom-1 right-1 w-3 h-3 text-slate-600 group-hover:text-slate-400 transition-colors"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path d="M22 22L16 16M22 16L16 22" />
-                <path d="M22 16L16 10M16 22L10 16" strokeOpacity={0.5} />
-              </svg>
-              {/* Invisible hit area for easier grabbing */}
-              <div className="absolute inset-0" />
             </div>
           )}
+
+          {/* ── Resize handles (8 directions) ── */}
+          {!isMinimized && (<>
+            {/* Edges */}
+            <div className="absolute top-9 left-0 w-1.5 bottom-0 cursor-w-resize hover:bg-cyan-500/20" onMouseDown={handleResizeStart('w')} />
+            <div className="absolute top-9 right-0 w-1.5 bottom-0 cursor-e-resize hover:bg-cyan-500/20" onMouseDown={handleResizeStart('e')} />
+            <div className="absolute top-9 left-0 right-0 h-1.5 cursor-n-resize hover:bg-cyan-500/20" onMouseDown={handleResizeStart('n')} />
+            <div className="absolute bottom-0 left-0 right-0 h-1.5 cursor-s-resize hover:bg-cyan-500/20" onMouseDown={handleResizeStart('s')} />
+            {/* Corners */}
+            <div className="absolute top-9 left-0 w-3 h-3 cursor-nw-resize" onMouseDown={handleResizeStart('nw')} />
+            <div className="absolute top-9 right-0 w-3 h-3 cursor-ne-resize" onMouseDown={handleResizeStart('ne')} />
+            <div className="absolute bottom-0 left-0 w-3 h-3 cursor-sw-resize" onMouseDown={handleResizeStart('sw')} />
+            <div className="absolute bottom-0 right-0 w-4 h-4 cursor-se-resize flex items-end justify-end p-0.5" onMouseDown={handleResizeStart('se')}>
+              <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-2.5 h-2.5 text-slate-600">
+                <path d="M9 3L3 9M9 6L6 9"/>
+              </svg>
+            </div>
+          </>)}
         </div>
       )}
     </div>

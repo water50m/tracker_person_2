@@ -1,0 +1,21 @@
+{
+  "settings_version": "0.0.6",
+  "datasets_dir": "E:\\data\\tracker_app\\datasets",
+  "weights_dir": "E:\\data\\tracker_app\\tracker_person_2\\weights",
+  "runs_dir": "E:\\data\\tracker_app\\tracker_person_2\\runs",
+  "uuid": "05840d97e466e7c6bd431e7a180e9addf49976c7fdf96cba45704d697be71232",
+  "sync": true,
+  "api_key": "",
+  "openai_api_key": "",
+  "clearml": true,
+  "comet": true,
+  "dvc": true,
+  "hub": true,
+  "mlflow": true,
+  "neptune": true,
+  "raytune": true,
+  "tensorboard": false,
+  "wandb": false,
+  "vscode_msg": true,
+  "openvino_msg": true
+}

@@ -155,6 +155,8 @@ export interface SearchResult {
   camera_id: string;
   camera_name?: string;
   timestamp: string;
+  track_id?: number;
+  frame?: number;
   // Backward compatibility: primary item info (first item)
   clothing_class: ClothingClass;
   color: ClothingColor;

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -83,7 +82,7 @@ class JsonVideoQueueService:
         self._jobs: dict[str, JsonQueueJob] = {}
         self._queue_order: list[str] = []
         self._current_job_id: str | None = None
-        self._current_process: asyncio.subprocess.Process | None = None
+        self._current_process: asyncio.subprocess.Process | asyncio.Event | None = None
         self._lock = asyncio.Lock()
         self._processing_task: asyncio.Task | None = None
         self._load()
@@ -185,7 +184,10 @@ class JsonVideoQueueService:
             if not job or job.status not in {"pending", "processing"}:
                 return False
             if job.status == "processing" and self._current_process is not None:
-                self._current_process.terminate()
+                if isinstance(self._current_process, asyncio.Event):
+                    self._current_process.set()
+                elif self._current_process is not None:
+                    self._current_process.terminate()
             job.status = "paused"
             job.completed_at = time.time()
             if job_id in self._queue_order:
@@ -216,13 +218,22 @@ class JsonVideoQueueService:
     async def start_job_immediately(self, job_id: str) -> bool:
         async with self._lock:
             job = self._jobs.get(job_id)
-            if not job or job.status not in {"pending", "paused", "stopped", "failed", "completed"}:
+            if not job:
+                return False
+            if job.status == "processing" and self._current_job_id == job_id:
+                return True
+            if job.status not in {"pending", "paused", "stopped", "failed", "completed"}:
                 return False
             if self._current_job_id and self._current_job_id != job_id:
                 current = self._jobs.get(self._current_job_id)
                 if current and current.status == "processing":
                     if self._current_process is not None:
-                        self._current_process.terminate()
+                        if isinstance(self._current_process, asyncio.Event):
+                            self._current_process.set()
+                        else:
+                            self._current_process.terminate()
+                elif self._current_process is not None:
+                    self._current_process.terminate()
                     current.status = "paused"
                     current.completed_at = time.time()
                     if current.id not in self._queue_order:
@@ -266,7 +277,10 @@ class JsonVideoQueueService:
             if not job or job.status not in {"pending", "processing", "paused"}:
                 return False
             if job.status == "processing" and self._current_process is not None:
-                self._current_process.terminate()
+                if isinstance(self._current_process, asyncio.Event):
+                    self._current_process.set()
+                elif self._current_process is not None:
+                    self._current_process.terminate()
             job.status = "stopped"
             job.completed_at = time.time()
             if job_id in self._queue_order:
@@ -281,7 +295,10 @@ class JsonVideoQueueService:
             if not job:
                 return False
             if job.status == "processing" and self._current_process is not None:
-                self._current_process.terminate()
+                if isinstance(self._current_process, asyncio.Event):
+                    self._current_process.set()
+                elif self._current_process is not None:
+                    self._current_process.terminate()
             self._jobs.pop(job_id, None)
             if job_id in self._queue_order:
                 self._queue_order.remove(job_id)
@@ -350,65 +367,50 @@ class JsonVideoQueueService:
             self._save()
         self._sync_index(job)
 
-        logs_dir = self.root / "json_jobs" / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        job.stdout_log = str((logs_dir / f"{job_id}.stdout.log").resolve())
-        job.stderr_log = str((logs_dir / f"{job_id}.stderr.log").resolve())
-        script_path = Path.cwd() / "scripts" / "predict_video_full_pipeline.py"
-        command = [
-            sys.executable,
-            str(script_path),
-            "--video",
-            job.source,
-            "--output-dir",
-            str(Path(get_json_storage_root()) / (job.output_dir or job.id)),
-            "--job-id",
-            job.id,
-            "--json-index",
-            str(Path(get_json_storage_index()).resolve()),
-            "--json-only-output",
-            "--save-json-id-images",
-            "--json-id-image-lost-timeout-frames",
-            "30",
-            "--camera-id",
-            job.camera_id,
-            "--db-video-label",
-            job.original_filename or job.id,
-            "--frame-stride",
-            str(max(1, job.frame_skip)),
-        ]
-        stdout_handle = Path(job.stdout_log).open("w", encoding="utf-8")
-        stderr_handle = Path(job.stderr_log).open("w", encoding="utf-8")
+        from src.services.background_processor import (
+            process_video_background_task,
+            get_background_task_status,
+        )
+
+        stop_event = asyncio.Event()
+        self._current_process = stop_event  # type: ignore[assignment]
+
+        async def _track_progress() -> None:
+            while not stop_event.is_set():
+                state = get_background_task_status(job_id)
+                if state:
+                    total = state.get("total_frames") or 0
+                    processed = state.get("frames_processed") or 0
+                    job.progress_pct = int(processed * 100 / total) if total else 0
+                    async with self._lock:
+                        self._jobs[job_id] = job
+                        self._save()
+                    self._sync_index(job)
+                await asyncio.sleep(1.0)
+
+        tracker = asyncio.create_task(_track_progress())
         try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=str(Path.cwd()),
-                stdout=stdout_handle,
-                stderr=stderr_handle,
+            await process_video_background_task(
+                video_path=job.source,
+                camera_id=job.camera_id,
+                frame_skip=max(1, job.frame_skip),
+                save_to_db=False,
+                task_id=job_id,
+                save_images=job.save_images,
+                save_bbox_images=job.save_bbox_images,
+                stop_event=stop_event,
             )
-            self._current_process = process
-            while process.returncode is None:
-                await self._refresh_job_from_index(job)
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    pass
-            await self._refresh_job_from_index(job)
-            if process.returncode == 0 and job.status not in {"stopped", "paused"}:
+            if job.status not in {"stopped", "paused"}:
                 job.status = "completed"
                 job.progress_pct = 100
-                job.completed_at = time.time()
-            elif job.status not in {"stopped", "paused"}:
-                job.status = "failed"
-                job.error_message = f"Pipeline exited with code {process.returncode}"
                 job.completed_at = time.time()
         except Exception as exc:
             job.status = "failed"
             job.error_message = str(exc)
             job.completed_at = time.time()
         finally:
-            stdout_handle.close()
-            stderr_handle.close()
+            stop_event.set()
+            tracker.cancel()
             self._current_process = None
             self._current_job_id = None
             async with self._lock:

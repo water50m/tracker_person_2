@@ -1,5 +1,4 @@
 {
-  "_comment": "System configuration file. Edit this file to change settings.",
   "database": {
     "host": "myserver",
     "port": 5432,

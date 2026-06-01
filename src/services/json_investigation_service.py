@@ -309,7 +309,7 @@ class JsonInvestigationService:
                     if not items:
                         continue
                     first_item = items[0]
-                    image_url = self._image_url(job_dir, job_id, person, track_id)
+                    image_url = self._image_url(job_dir, job_id, person, track_id, frame_no)
                     record = {
                         "id": self._detection_id(job_id, frame_no, track_id),
                         "track_id": track_id,
@@ -429,7 +429,34 @@ class JsonInvestigationService:
                     seen.add(child)
                     yield child
 
-    def _image_url(self, job_dir: Path, job_id: str, person: dict[str, Any], track_id: int) -> str | None:
+    def _image_url(
+        self,
+        job_dir: Path,
+        job_id: str,
+        person: dict[str, Any],
+        track_id: int,
+        frame_no: int = 0,
+    ) -> str | None:
+        """
+        Build a thumbnail URL for a detection.
+
+        Primary strategy: generate a /frame-crop URL so FastAPI dynamically
+        extracts the bbox region from the source video at the exact frame.
+
+        Fallback (when bbox is missing): serve a pre-saved image file.
+        """
+        bbox = person.get("bbox")
+        if bbox and len(bbox) == 4:
+            try:
+                x1, y1, x2, y2 = [float(v) for v in bbox]
+                return (
+                    f"/api/json/jobs/{job_id}/frame-crop"
+                    f"?frame={frame_no}&x1={x1:.1f}&y1={y1:.1f}&x2={x2:.1f}&y2={y2:.1f}"
+                )
+            except (TypeError, ValueError):
+                pass  # fall through to file-based fallback
+
+        # Fallback: pre-saved image file
         image_path = person.get("image_path")
         if not image_path:
             image_path = self._json_id_image_path(job_dir, track_id)
