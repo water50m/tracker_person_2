@@ -12,6 +12,8 @@ interface SystemConfig {
     frame_skip: number;
     detection_enabled: boolean;
     classification_enabled: boolean;
+    // nested sections (come from backend config as-is)
+    processing?: { color_remove_background?: boolean };
 }
 
 interface HardwareInfo {
@@ -44,7 +46,7 @@ interface ModelFile {
     size_mb: number;
 }
 
-type Tab = "MODELS" | "DETECTION" | "SYSTEM" | "DATABASE";
+type Tab = "MODELS" | "DETECTION" | "SYSTEM" | "DATABASE" | "TEST";
 
 const TAB_KEYS: Record<string, (keyof SystemConfig)[]> = {
     MODELS: ["detector_model", "classifier_model", "detection_enabled", "classification_enabled"],
@@ -185,7 +187,7 @@ export default function SystemPage() {
         }
     };
 
-    const tabs: Tab[] = ["MODELS", "DETECTION", "SYSTEM", "DATABASE"];
+    const tabs: Tab[] = ["MODELS", "DETECTION", "SYSTEM", "DATABASE", "TEST"];
 
     return (
         <div className="flex flex-col h-screen bg-slate-950 text-slate-300 overflow-hidden">
@@ -286,8 +288,9 @@ export default function SystemPage() {
                                 resetting={resetting}
                             />
                         )}
-                        {activeTab === "SYSTEM" && <SystemTab data={data} />}
+                        {activeTab === "SYSTEM" && <SystemTab data={data} draft={draft} setDraft={setDraft} />}
                         {activeTab === "DATABASE" && <DatabaseTab />}
+                        {activeTab === "TEST" && <TestTab backendUrl={backendUrl} />}
                     </>
                 )}
             </div>
@@ -480,13 +483,56 @@ function DetectionTab({
 }
 
 // ─── Tab: System Info ─────────────────────────────────────────
-function SystemTab({ data }: { data: SettingsData | null }) {
+function SystemTab({
+    data,
+    draft,
+    setDraft,
+}: {
+    data: SettingsData | null;
+    draft: Partial<SystemConfig>;
+    setDraft: React.Dispatch<React.SetStateAction<Partial<SystemConfig>>>;
+}) {
     if (!data) return null;
     const hw = data.hardware;
     const modifiedKeys = Array.isArray(data.modified_keys) ? data.modified_keys : [];
     const defaults = data.defaults ?? {};
+    const removeBg = draft.processing?.color_remove_background ?? true;
     return (
         <div className="grid grid-cols-3 gap-6 w-full">
+            <SettingsCard title="PROCESSING SETTINGS">
+                <FieldLabel>COLOR ANALYSIS</FieldLabel>
+                <div className="space-y-4">
+                    <div className="flex items-start justify-between gap-4">
+                        <div>
+                            <p className="font-mono text-xs text-slate-300">Background Removal</p>
+                            <p className="font-mono text-[10px] text-slate-500 mt-1 leading-relaxed">
+                                ตัด BG ก่อนนับสีเสื้อผ้า (rembg / GrabCut)<br />
+                                ปิดเพื่อความเร็ว แต่สีอาจ mix กับฉากหลัง
+                            </p>
+                        </div>
+                        <Toggle
+                            label="REMOVE BG"
+                            value={removeBg}
+                            onChange={(v) =>
+                                setDraft((d) => ({
+                                    ...d,
+                                    processing: { ...d.processing, color_remove_background: v },
+                                }))
+                            }
+                        />
+                    </div>
+                    <div className={`px-3 py-2 rounded-sm border font-mono text-[10px] leading-relaxed ${
+                        removeBg
+                            ? "border-green-800/40 bg-green-950/20 text-green-400"
+                            : "border-amber-700/40 bg-amber-950/20 text-amber-400"
+                    }`}>
+                        {removeBg
+                            ? "✓ BG removal ON — สีแม่นขึ้น (~10–50ms/item)"
+                            : "⚡ BG removal OFF — เร็วกว่า แต่สี BG อาจปน"}
+                    </div>
+                </div>
+            </SettingsCard>
+
             <SettingsCard title="HARDWARE">
                 <InfoRow label="DEVICE" value={hw.device.toUpperCase()} highlight={hw.device === "cuda"} />
                 <InfoRow label="GPU NAME" value={hw.device_name} />
@@ -652,6 +698,343 @@ function DatabaseTab() {
             </div>
         </div>
     );
+}
+
+// ─── Tab: Test ────────────────────────────────────────────────
+
+type TestSubTab = "COLOR";
+
+interface ColorItem {
+  slot: string; cls: string; confidence: number; bbox: number[];
+  detailed_colors: Record<string, number>;
+  color_groups: Record<string, number>;
+  primary_color: string; primary_group: string;
+}
+interface ColorPerson {
+  track_id: number; bbox: number[]; confidence: number;
+  stable_label: string; items: ColorItem[];
+}
+interface ColorResult {
+  persons: ColorPerson[];
+  annotated_image: string;
+  width: number; height: number;
+}
+
+function TestTab({ backendUrl }: { backendUrl: string }) {
+  const [subTab, setSubTab] = React.useState<TestSubTab>("COLOR");
+  return (
+    <div className="flex flex-col gap-4 w-full h-full">
+      {/* sub-tab bar */}
+      <div className="flex gap-2">
+        {(["COLOR"] as TestSubTab[]).map((t) => (
+          <button key={t} onClick={() => setSubTab(t)}
+            className={`px-4 py-1.5 font-mono text-xs tracking-widest rounded-sm border transition-all ${
+              subTab === t
+                ? "border-cyan-500/60 bg-cyan-950/30 text-cyan-400"
+                : "border-slate-700 text-slate-500 hover:border-slate-600 hover:text-slate-300"
+            }`}>
+            TEST {t}
+          </button>
+        ))}
+      </div>
+      {subTab === "COLOR" && <TestColorTab backendUrl={backendUrl} />}
+    </div>
+  );
+}
+
+const SLOT_COLORS: Record<string, string> = {
+  top: "border-blue-500/60 text-blue-300",
+  bottom: "border-orange-500/60 text-orange-300",
+  dress: "border-purple-500/60 text-purple-300",
+};
+
+const COLOR_CSS: Record<string, string> = {
+  red: "#e02020", dark_red: "#7a0a0a", crimson: "#be0f2f", scarlet: "#e8200a",
+  maroon: "#5c0a0a", burgundy: "#6e1030",
+  orange: "#f07020", dark_orange: "#a04010", amber: "#f0a010", peach: "#f8c090",
+  coral: "#f06840",
+  yellow: "#f0d020", gold: "#d4a020", light_yellow: "#f8f0a0", mustard: "#b09020",
+  khaki: "#d0c880",
+  green: "#30a030", dark_green: "#0a5010", light_green: "#80d080", olive: "#606820",
+  lime: "#80d020", forest_green: "#1a5c20", mint: "#90f0b0", teal: "#208070",
+  cyan: "#10d0e0", aqua: "#40d8e0",
+  blue: "#2060d0", dark_blue: "#0a1870", light_blue: "#90b8f0", navy: "#0a1850",
+  sky_blue: "#60b8f8", royal_blue: "#2040c8", cobalt: "#1830c0", turquoise: "#30b8d0",
+  indigo: "#3020a0", denim: "#4060a0",
+  purple: "#8030c0", dark_purple: "#4010a0", light_purple: "#c080f0",
+  violet: "#7020d0", lavender: "#c0a0f0", magenta: "#d020c0", pink: "#f050a0",
+  hot_pink: "#f01880", light_pink: "#f8b0d0", rose: "#f03060", salmon: "#f08070",
+  white: "#f8f8f8", light_gray: "#c8c8c8", silver: "#b0b8c0", gray: "#808080",
+  dark_gray: "#404040", black: "#181818", charcoal: "#2c2c2c",
+  brown: "#7a4020", dark_brown: "#3a1808", tan: "#c89060", beige: "#e8d8b0",
+  cream: "#f8f0d0", chocolate: "#5c2010",
+  nude: "#d4a880", blush: "#f0a0a0",
+};
+
+function ColorSwatch({ name, size = 14 }: { name: string; size?: number }) {
+  const css = COLOR_CSS[name];
+  if (!css) return null;
+  return (
+    <span
+      style={{ width: size, height: size, background: css, flexShrink: 0 }}
+      className="inline-block rounded-sm border border-white/10 align-middle"
+      title={name}
+    />
+  );
+}
+
+function TestColorTab({ backendUrl }: { backendUrl: string }) {
+  const [imgSrc, setImgSrc] = React.useState<string | null>(null);
+  const [result, setResult] = React.useState<ColorResult | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [removeBg, setRemoveBg] = React.useState<boolean | null>(null); // null = use config
+  const pasteAreaRef = React.useRef<HTMLDivElement>(null);
+
+  // paste handler
+  React.useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const item = Array.from(e.clipboardData?.items ?? []).find(
+        (i) => i.type.startsWith("image/")
+      );
+      if (!item) return;
+      const blob = item.getAsFile();
+      if (!blob) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        setImgSrc(ev.target?.result as string);
+        setResult(null);
+        setError(null);
+      };
+      reader.readAsDataURL(blob);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, []);
+
+  const handleFile = (file: File) => {
+    if (!file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      setImgSrc(ev.target?.result as string);
+      setResult(null);
+      setError(null);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const analyze = async () => {
+    if (!imgSrc) return;
+    setLoading(true); setError(null); setResult(null);
+    try {
+      const body: Record<string, unknown> = { image: imgSrc };
+      if (removeBg !== null) body.remove_bg = removeBg;
+      const res = await fetch(`${backendUrl}/api/test/color-analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(err.detail ?? "Analyze failed");
+      }
+      setResult(await res.json());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="grid grid-cols-2 gap-6 w-full min-h-0">
+      {/* LEFT: input */}
+      <div className="flex flex-col gap-4">
+        <SettingsCard title="IMAGE INPUT">
+          {/* paste / drop zone */}
+          <div
+            ref={pasteAreaRef}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              const f = e.dataTransfer.files[0];
+              if (f) handleFile(f);
+            }}
+            onClick={() => {
+              const inp = document.createElement("input");
+              inp.type = "file"; inp.accept = "image/*";
+              inp.onchange = () => { if (inp.files?.[0]) handleFile(inp.files[0]); };
+              inp.click();
+            }}
+            className="relative border-2 border-dashed border-slate-700 hover:border-cyan-600/60 rounded-sm
+                       flex flex-col items-center justify-center gap-3 cursor-pointer transition-all
+                       bg-slate-900/40 hover:bg-cyan-950/10 min-h-[180px]"
+          >
+            {imgSrc ? (
+              <img src={imgSrc} alt="input" className="max-h-64 max-w-full object-contain rounded" />
+            ) : (
+              <>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}
+                  className="w-10 h-10 text-slate-600">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <circle cx="8.5" cy="8.5" r="1.5" />
+                  <path d="M21 15l-5-5L5 21" />
+                </svg>
+                <p className="font-mono text-xs text-slate-500 text-center leading-relaxed">
+                  PASTE image (Ctrl+V)<br />or DRAG & DROP / CLICK to browse
+                </p>
+              </>
+            )}
+          </div>
+
+          {/* options */}
+          <div className="flex items-center justify-between mt-1">
+            <span className="font-mono text-[10px] text-slate-500">BG Removal Override</span>
+            <div className="flex gap-1">
+              {([null, true, false] as (boolean | null)[]).map((v) => (
+                <button key={String(v)} onClick={() => setRemoveBg(v)}
+                  className={`px-2 py-0.5 font-mono text-[10px] rounded-sm border transition-all ${
+                    removeBg === v
+                      ? "border-cyan-500/60 bg-cyan-950/30 text-cyan-300"
+                      : "border-slate-700 text-slate-500 hover:border-slate-600"
+                  }`}>
+                  {v === null ? "CONFIG" : v ? "ON" : "OFF"}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <button onClick={analyze} disabled={!imgSrc || loading}
+            className="w-full font-mono text-xs font-bold py-2.5 rounded-sm border transition-all tracking-widest
+                       border-cyan-500/60 bg-cyan-950/30 text-cyan-400
+                       hover:bg-cyan-900/40 hover:border-cyan-400
+                       disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+            {loading ? (
+              <>
+                <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+                ANALYZING…
+              </>
+            ) : "▶ ANALYZE"}
+          </button>
+
+          {error && (
+            <div className="font-mono text-xs text-red-400 border border-red-800/40 bg-red-950/20 px-3 py-2 rounded-sm">
+              ✗ {error}
+            </div>
+          )}
+        </SettingsCard>
+
+        {/* annotated result image */}
+        {result && (
+          <SettingsCard title={`RESULT — ${result.width}×${result.height} · ${result.persons.length} person(s)`}>
+            <img src={result.annotated_image} alt="annotated" className="w-full rounded object-contain" />
+          </SettingsCard>
+        )}
+      </div>
+
+      {/* RIGHT: structured results */}
+      <div className="flex flex-col gap-4 overflow-y-auto">
+        {!result && !loading && (
+          <div className="flex flex-col items-center justify-center h-48 gap-2 text-slate-700">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1} className="w-10 h-10">
+              <path d="M9 17H5a2 2 0 00-2 2v2M5 3h14a2 2 0 012 2v4M3 7l9 6 9-6" />
+            </svg>
+            <p className="font-mono text-[10px] tracking-widest">PASTE AN IMAGE AND CLICK ANALYZE</p>
+          </div>
+        )}
+
+        {result?.persons.map((person) => (
+          <SettingsCard key={person.track_id}
+            title={`PERSON ID:${person.track_id} — ${person.stable_label || "unknown"}`}>
+            <div className="flex items-center gap-2 mb-2">
+              <span className="font-mono text-[10px] text-slate-500">
+                conf {(person.confidence * 100).toFixed(0)}%
+              </span>
+              <span className="font-mono text-[10px] text-slate-600">
+                bbox [{person.bbox.join(", ")}]
+              </span>
+            </div>
+
+            {person.items.length === 0 && (
+              <p className="font-mono text-xs text-slate-600">No clothing detected</p>
+            )}
+
+            {person.items.map((item, idx) => (
+              <div key={idx}
+                className={`border rounded-sm p-3 space-y-2 ${SLOT_COLORS[item.slot] ?? "border-slate-700"}`}>
+                {/* header */}
+                <div className="flex items-center justify-between">
+                  <span className={`font-mono text-[10px] uppercase tracking-widest font-bold ${
+                    SLOT_COLORS[item.slot]?.split(" ")[1] ?? "text-slate-400"
+                  }`}>
+                    {item.slot.toUpperCase()}
+                  </span>
+                  <span className="font-mono text-xs text-slate-300">
+                    {item.cls} <span className="text-slate-500">({(item.confidence * 100).toFixed(0)}%)</span>
+                  </span>
+                </div>
+
+                {/* primary color */}
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[10px] text-slate-500">PRIMARY</span>
+                  <ColorSwatch name={item.primary_color} size={16} />
+                  <span className="font-mono text-xs text-white font-bold">{item.primary_color}</span>
+                  <span className="font-mono text-[10px] text-slate-500">({item.primary_group})</span>
+                </div>
+
+                {/* color bar */}
+                {Object.keys(item.detailed_colors).length > 0 && (
+                  <div>
+                    <p className="font-mono text-[9px] text-slate-600 mb-1">DETAILED COLORS</p>
+                    <div className="flex rounded-sm overflow-hidden h-5">
+                      {Object.entries(item.detailed_colors)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([name, pct]) => (
+                          <div key={name}
+                            style={{ width: `${pct}%`, background: COLOR_CSS[name] ?? "#555" }}
+                            title={`${name}: ${pct.toFixed(1)}%`}
+                            className="border-r border-black/20 last:border-0" />
+                        ))}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1.5">
+                      {Object.entries(item.detailed_colors)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([name, pct]) => (
+                          <span key={name} className="flex items-center gap-1 font-mono text-[9px] text-slate-300">
+                            <ColorSwatch name={name} size={10} />
+                            {name} {pct.toFixed(1)}%
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* color groups */}
+                {Object.keys(item.color_groups).length > 0 && (
+                  <div>
+                    <p className="font-mono text-[9px] text-slate-600 mb-1">COLOR GROUPS</p>
+                    <div className="flex flex-wrap gap-1">
+                      {Object.entries(item.color_groups)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([grp, pct]) => (
+                          <span key={grp}
+                            className="font-mono text-[9px] px-1.5 py-0.5 rounded-sm bg-slate-800 text-slate-400 border border-slate-700">
+                            {grp} {pct.toFixed(0)}%
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </SettingsCard>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 // ─── Shared UI Atoms ──────────────────────────────────────────
