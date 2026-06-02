@@ -14,19 +14,30 @@ from typing import Any
 
 import cv2
 
-from apply_viewer_reid import color_distribution, compare_segment, profile_from_person  # noqa: F401 (re-exported)
+from apply_viewer_reid import color_distribution, compare_segment, profile_from_person  # noqa: F401
 from predict_video_clothing_viewer import (
     CLASS_DISPLAY_ORDER,
     clamp_bbox,
-    clothing_slot,
-    id_color,  # noqa: F401 (re-exported)
+    id_color,  # noqa: F401
 )
+
+
+def clothing_slot(class_name: str) -> str | None:
+    if class_name in {"short_sleeve", "long_sleeve"}:
+        return "top"
+    if class_name == "dress":
+        return "dress"
+    if class_name in {"shorts", "trousers", "skirt"}:
+        return "bottom"
+    return None
+from src.ai.clothing_predictor import TARGET_CLASSES  # noqa: F401 (re-exported for pipeline use)
 from src.ai.color_system import (
     analyze_detailed_colors,
     get_color_groups,
     get_primary_color_group,
     get_primary_detailed_color,
 )
+from src.config_loader import get_color_remove_background as _get_color_remove_background
 
 
 # ── Timing helper (no-op version safe for streaming) ────────────────────────
@@ -81,7 +92,8 @@ def add_item_colors(frame, item: dict[str, Any], width: int, height: int) -> Non
 
 
 def add_item_detailed_colors(
-    frame, item: dict[str, Any], width: int, height: int, max_size: int = 0
+    frame, item: dict[str, Any], width: int, height: int, max_size: int = 0,
+    remove_bg: bool | None = None,
 ) -> None:
     bbox = item.get("bbox")
     if not bbox:
@@ -90,8 +102,14 @@ def add_item_detailed_colors(
         item["primary_detailed_color"] = "unknown"
         item["primary_color_group"] = "unknown"
         return
+    if remove_bg is None:
+        remove_bg = _get_color_remove_background()
     x1, y1, x2, y2 = clamp_bbox([int(v) for v in bbox], width, height) or [0, 0, 0, 0]
-    detailed_colors = analyze_detailed_colors(resized_for_color(frame[y1:y2, x1:x2], max_size))
+    detailed_colors = analyze_detailed_colors(
+        resized_for_color(frame[y1:y2, x1:x2], max_size), remove_bg=remove_bg
+    )
+    # keep top-3 colors by percentage (same rule as old video_controller.py)
+    detailed_colors = dict(sorted(detailed_colors.items(), key=lambda x: x[1], reverse=True)[:3])
     color_groups = get_color_groups(detailed_colors)
     item["detailed_colors"] = detailed_colors
     item["color_groups"] = color_groups
@@ -110,13 +128,16 @@ def apply_detailed_color_with_cache(
     cache: dict[tuple[int, str], dict[str, Any]],
     timings: Any = None,
     color_resize: int = 0,
+    remove_bg: bool | None = None,
 ) -> None:
     if timings is None:
         timings = DummyTimings()
+    if remove_bg is None:
+        remove_bg = _get_color_remove_background()
 
     slot = clothing_slot(item.get("class", ""))
     if slot is None:
-        add_item_detailed_colors(frame, item, width, height, color_resize)
+        add_item_detailed_colors(frame, item, width, height, color_resize, remove_bg=remove_bg)
         item["detailed_color_source"] = "analyzed_no_slot"
         return
 
@@ -131,7 +152,7 @@ def apply_detailed_color_with_cache(
 
     if should_analyze:
         t0 = time.perf_counter()
-        add_item_detailed_colors(frame, item, width, height, color_resize)
+        add_item_detailed_colors(frame, item, width, height, color_resize, remove_bg=remove_bg)
         timings.add("detailed_color_analysis", time.perf_counter() - t0, 1)
         item["detailed_color_source"] = "analyzed"
         cache[key] = {

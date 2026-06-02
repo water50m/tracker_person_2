@@ -21,6 +21,11 @@ WORKSPACE = Path(__file__).resolve().parents[2]
 os.environ.setdefault("YOLO_CONFIG_DIR", str(WORKSPACE / ".ultralytics"))
 os.environ.setdefault("MPLCONFIGDIR", str(WORKSPACE / ".matplotlib"))
 
+# Add scripts/ to sys.path for pipeline_shared, apply_viewer_reid, etc.
+_SCRIPTS_DIR = str(WORKSPACE / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
 # Refactored VideoProcessor (lazy import to avoid loading if not used)
 _video_processor = None
 _thread_pool = None
@@ -1201,6 +1206,8 @@ _STREAM_ANALYSIS_ACTIVE: dict[str, asyncio.Event] = {}
 _CV2_ANALYSIS_STATE: dict[str, dict] = {}
 _CV2_STOP_EVENTS: dict[str, asyncio.Event] = {}
 _REALTIME_DEPS: tuple[object, object, type, type] | None = None
+# Stores completed stream info: stream_id → {"status": "completed", "job_id": ...}
+_STREAM_COMPLETED: dict[str, dict] = {}
 
 
 def _make_stream_analysis_id(camera_id: Optional[str] = None, requested_id: Optional[str] = None) -> str:
@@ -1279,12 +1286,7 @@ async def _realtime_analysis_generator(
     import numpy as np
     from ultralytics import YOLO as _YOLO
 
-    _WORKSPACE = Path(__file__).resolve().parents[2]
-    _SCRIPTS = str(_WORKSPACE / "scripts")
-    if _SCRIPTS not in sys.path:
-        sys.path.insert(0, _SCRIPTS)
-
-    from evaluate_clothing_model import YoloPredictor as _YoloPredictor, prediction_result as _prediction_result
+    from src.ai.clothing_predictor import YoloPredictor as _YoloPredictor, prediction_result as _prediction_result
     from predict_video_clothing_viewer import (
         clamp_bbox as _clamp_bbox,
         dedupe_persons_by_iou as _dedupe_persons_by_iou,
@@ -1292,7 +1294,6 @@ async def _realtime_analysis_generator(
     )
     from pipeline_shared import (
         OnlineReID as _OnlineReID,
-        add_item_colors as _add_item_colors,
         apply_detailed_color_with_cache as _apply_detailed_color_with_cache,
         class_summary as _class_summary,
         id_color as _id_color,
@@ -1367,7 +1368,6 @@ async def _realtime_analysis_generator(
     # ── JSON result accumulator ────────────────────────────────────────────
     # Keyed by frame_no so multiple persons per frame are grouped correctly.
     _JSON_BATCH_SIZE = 100      # flush to disk every N AI-processed frames
-    _json_frame_persons: dict[int, list] = {}
     _json_image_dir: Path | None = None
     _json_out_dir: Path = Path(".")   # set below when save_json_results
     if save_json_results:
@@ -1409,16 +1409,21 @@ async def _realtime_analysis_generator(
             except Exception:
                 pass
 
-    # latest voted class name per track_id — updated incrementally, written on flush
-    _json_track_votes: dict[int, dict] = {}
+    # latest representative person snapshot per track_id (updated on trigger, frames format)
+    _track_snapshots: dict[int, dict] = {}
 
     def _flush_json_results(*, final: bool = False) -> None:
-        """Write voted class names per track_id to prediction_results.json (atomic replace).
+        """Write one representative frame per track to prediction_results.json.
 
-        During processing: writes only tracks that have a non-empty stable_label.
-        On final flush: writes full frames array with complete metadata.
+        Format is {"metadata": ..., "frames": [...]} — same as predict_video_full_pipeline
+        so json_investigation_service can read it. Each track contributes one frame entry
+        (the latest snapshot at trigger time). Saves only tracks with a stable_label.
         """
         import json as _j
+
+        _snaps = {tid: s for tid, s in _track_snapshots.items() if s.get("stable_label")}
+        if not _snaps:
+            return
 
         _metadata = {
             "source_video": video_path,
@@ -1430,22 +1435,16 @@ async def _realtime_analysis_generator(
             "stream_id": stream_id,
             "status": "completed" if final else "processing",
         }
-
-        if final:
-            _frames = [
-                {"frame": _fn, "time": round(_fn / fps, 4), "persons": _ps}
-                for _fn, _ps in sorted(_json_frame_persons.items())
-            ]
-            _data = {"metadata": _metadata, "frames": _frames}
-        else:
-            _votes_with_result = {
-                str(_tid): _v
-                for _tid, _v in _json_track_votes.items()
-                if _v.get("stable_label")
+        # one synthetic frame per track using the snapshot frame number
+        _frames = [
+            {
+                "frame": s["frame"],
+                "time": round(s["frame"] / fps, 4),
+                "persons": [s["person"]],
             }
-            if not _votes_with_result:
-                return
-            _data = {"metadata": _metadata, "track_votes": _votes_with_result}
+            for s in sorted(_snaps.values(), key=lambda x: x["frame"])
+        ]
+        _data = {"metadata": _metadata, "frames": _frames}
 
         _tmp = _json_out_dir / "prediction_results.json.tmp"
         _out = _json_out_dir / "prediction_results.json"
@@ -1628,7 +1627,6 @@ async def _realtime_analysis_generator(
                                         width_cap, height_cap,
                                     )
                                 if target is final_items:
-                                    _add_item_colors(frame, item, width_cap, height_cap)
                                     _apply_detailed_color_with_cache(
                                         frame, item, width_cap, height_cap,
                                         int(p["id"]), frame_count,
@@ -1703,13 +1701,23 @@ async def _realtime_analysis_generator(
                                 }
                                 if _saved_img_path:
                                     _person_entry["image_path"] = _saved_img_path
-                                _json_frame_persons.setdefault(frame_count, []).append(_person_entry)
 
                                 _sl = person.get("stable_label") or ""
                                 if _sl:
-                                    _json_track_votes[our_id] = {
+                                    _track_snapshots[our_id] = {
+                                        "frame": frame_count,
                                         "stable_label": _sl,
-                                        "stable_classes": stable_clothing.get("classes") or [],
+                                        "person": {
+                                            "id": our_id,
+                                            "original_id": int(person.get("original_id", our_id)),
+                                            "bbox": [x1, y1, x2, y2],
+                                            "confidence": person["confidence"],
+                                            "reid_recovered": person.get("reid_recovered", False),
+                                            "stable_label": _sl,
+                                            "stable_clothing": stable_clothing,
+                                            "result_clothing": result_clothing,
+                                            **({"image_path": _saved_img_path} if _saved_img_path else {}),
+                                        },
                                     }
 
                                 _json_id_frame_count[our_id] += 1
@@ -1741,7 +1749,7 @@ async def _realtime_analysis_generator(
                             cls_name = item.get("class") if isinstance(item, dict) else getattr(item, "class_name", "")
                             conf = item.get("confidence") if isinstance(item, dict) else getattr(item, "confidence", 0.0)
                             prefix = "" if idx == 0 else "  "
-                            labels.append(f"{prefix}{cls_name} ({float(conf):.2f})")
+                            labels.append(f"{prefix}{cls_name} ({float(conf or 0.0):.2f})")
                     if show_classifier_count and stable_items_list:
                         labels.append(f"[{len(stable_items_list)}]")
 
@@ -1753,8 +1761,10 @@ async def _realtime_analysis_generator(
                             cv2.putText(frame, lbl, (x1, y_off), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                             y_off -= (th + 8)
 
-            except Exception:
-                pass
+            except Exception as _ai_err:
+                import traceback as _tb
+                print(f"[stream-analyze AI error] {_ai_err}")
+                _tb.print_exc()
 
             # ── Post-frame: detect lost IDs + flush ───────────────────────
             if save_json_results:
@@ -1790,6 +1800,11 @@ async def _realtime_analysis_generator(
     finally:
         cap.release()
         _STREAM_ANALYSIS_ACTIVE.pop(stream_id, None)
+        _STREAM_COMPLETED[stream_id] = {
+            "status": "completed",
+            "job_id": json_job_id,
+            "stream_id": stream_id,
+        }
 
         # ── Final flush + register in index.json ──────────────────────────
         if save_json_results:
@@ -1961,6 +1976,23 @@ async def stop_stream_analyze(stream_id: str):
 async def list_active_stream_analysis():
     """List all active real-time analysis streams."""
     return {"active_streams": list(_STREAM_ANALYSIS_ACTIVE.keys())}
+
+
+@router.get("/stream-analyze/{stream_id}/status")
+async def get_stream_analyze_status(stream_id: str):
+    """Return completion status for a stream-analyze job.
+
+    Possible statuses:
+    - "processing"  — stream is currently active
+    - "completed"   — stream finished (video ended or stop requested)
+    - "not_found"   — unknown stream_id
+    """
+    if stream_id in _STREAM_ANALYSIS_ACTIVE:
+        return {"status": "processing", "stream_id": stream_id, "job_id": None}
+    if stream_id in _STREAM_COMPLETED:
+        info = _STREAM_COMPLETED[stream_id]
+        return {"status": "completed", "stream_id": stream_id, "job_id": info.get("job_id")}
+    return {"status": "not_found", "stream_id": stream_id, "job_id": None}
 
 
 @router.post("/analyze-cv2")

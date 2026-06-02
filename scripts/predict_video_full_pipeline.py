@@ -36,7 +36,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from apply_viewer_reid import compare_segment, color_distribution, profile_from_person
-from evaluate_clothing_model import TARGET_CLASSES, YoloPredictor, prediction_result
+from src.ai.clothing_predictor import TARGET_CLASSES, YoloPredictor, prediction_result
 from src.ai.color_system import (
     analyze_detailed_colors,
     get_color_groups,
@@ -59,7 +59,6 @@ from predict_video_clothing_viewer import (
 )
 from pipeline_shared import (
     OnlineReID,
-    add_item_colors,
     add_item_detailed_colors,
     apply_detailed_color_with_cache,
     class_summary,
@@ -1886,9 +1885,6 @@ def predict_full(args: argparse.Namespace) -> tuple[dict[str, Any], Timings]:
                                 height,
                             )
                         if target is final_items:
-                            basic_color_start = now()
-                            add_item_colors(frame, item, width, height)
-                            timings.add("clothing_basic_color", now() - basic_color_start, 1)
                             apply_detailed_color_with_cache(
                                 frame,
                                 item,

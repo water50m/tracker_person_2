@@ -51,7 +51,9 @@ export default function ImageModal() {
   const overlayRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [showVideo, setShowVideo] = useState(false);
-  const [activeTab, setActiveTab] = useState<'colors' | 'details'>('colors');
+  const [bboxVisible, setBboxVisible] = useState<Record<string, boolean>>({});
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const imgNaturalRef = useRef<{ w: number; h: number } | null>(null);
   const [videoPopupOpen, setVideoPopupOpen] = useState(false);
   const popupVideoRef = useRef<HTMLVideoElement>(null);
   const miniPlayerRef = useRef<HTMLDivElement>(null);
@@ -74,31 +76,82 @@ export default function ImageModal() {
   // State for time offset adjustment
   const [targetOffset, setTargetOffset] = useState<number>(0);
 
-  // Get items from detectionDetail or fallback to imageTarget
-  const items: DetectionItem[] = detectionDetail?.items || imageTarget?.items || [];
-
-  // Sort items: TOP first if exists, BOTTOM last if exists, DRESS positioned accordingly
+  // Get items early so drawBboxes can reference them
+  const items: DetectionItem[] = state.detectionDetail?.items || state.imageTarget?.items || [];
   const sortedItems = [...items].sort((a, b) => {
     const hasTop = items.some(i => i.category === 'TOP');
     const hasBottom = items.some(i => i.category === 'BOTTOM');
-
     const getPriority = (category: string) => {
-      if (hasTop) {
-        // TOP first, then DRESS, then others
-        if (category === 'TOP') return 0;
-        if (category === 'DRESS') return 1;
-        return 2;
-      } else if (hasBottom) {
-        // Others first, then DRESS, then BOTTOM last
-        if (category === 'BOTTOM') return 2;
-        if (category === 'DRESS') return 1;
-        return 0;
-      }
+      if (hasTop) { if (category === 'TOP') return 0; if (category === 'DRESS') return 1; return 2; }
+      else if (hasBottom) { if (category === 'BOTTOM') return 2; if (category === 'DRESS') return 1; return 0; }
       return 0;
     };
-
     return getPriority(a.category) - getPriority(b.category);
   });
+
+  const toggleBbox = (itemId: string) => {
+    setBboxVisible(prev => ({ ...prev, [itemId]: !prev[itemId] }));
+  };
+
+  // Draw bboxes on canvas — item bboxes are in full-frame coords; subtract person bbox offset
+  const drawBboxes = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    // Sync canvas pixel dimensions to its CSS display size
+    const cw = canvas.offsetWidth;
+    const ch = canvas.offsetHeight;
+    if (!cw || !ch) return;
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, cw, ch);
+
+    const nat = imgNaturalRef.current;
+    if (!nat) return;
+
+    // frame-crop API adds 15% padding around person bbox before cropping
+    // so the actual image top-left is (cx1, cy1), not (px1, py1)
+    const personBbox: number[] = detectionDetail?.bbox || [];
+    const px1 = Number(personBbox[0] ?? 0);
+    const py1 = Number(personBbox[1] ?? 0);
+    const px2 = Number(personBbox[2] ?? 0);
+    const py2 = Number(personBbox[3] ?? 0);
+    const bw = px2 - px1, bh = py2 - py1;
+    const PADDING = 0.15;
+    const cx1 = Math.max(0, Math.floor(px1 - bw * PADDING));
+    const cy1 = Math.max(0, Math.floor(py1 - bh * PADDING));
+
+    // object-contain scale
+    const scale = Math.min(cw / nat.w, ch / nat.h);
+    const rw = nat.w * scale, rh = nat.h * scale;
+    const ox = (cw - rw) / 2, oy = (ch - rh) / 2;
+
+    sortedItems.forEach(item => {
+      if (!bboxVisible[item.id]) return;
+      const bbox = item.bbox;
+      if (!bbox || bbox.length < 4) return;
+      // Convert full-frame → crop-relative by subtracting padded crop origin
+      const x1 = bbox[0] - cx1;
+      const y1 = bbox[1] - cy1;
+      const x2 = bbox[2] - cx1;
+      const y2 = bbox[3] - cy1;
+      const sx = ox + x1 * scale;
+      const sy = oy + y1 * scale;
+      const sw = (x2 - x1) * scale;
+      const sh = (y2 - y1) * scale;
+      ctx.strokeStyle = item.category === 'TOP' ? '#22d3ee' : '#34d399';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(sx, sy, sw, sh);
+      ctx.fillStyle = item.category === 'TOP' ? 'rgba(34,211,238,0.12)' : 'rgba(52,211,153,0.12)';
+      ctx.fillRect(sx, sy, sw, sh);
+      ctx.font = 'bold 11px monospace';
+      ctx.fillStyle = item.category === 'TOP' ? '#22d3ee' : '#34d399';
+      ctx.fillText(item.class_name, sx + 4, sy + 14);
+    });
+  }, [sortedItems, bboxVisible, detectionDetail]);
+
+  useEffect(() => { drawBboxes(); }, [drawBboxes]);
 
   // Get image URL from detectionDetail or fallback to imageTarget
   const effectiveImageUrl = detectionDetail?.image_url;
@@ -398,17 +451,29 @@ export default function ImageModal() {
         <div className="flex flex-col lg:flex-row flex-1 overflow-hidden min-h-0">
           
           {/* Left: Image Display */}
-          <div className="relative flex-1 min-h-[300px] lg:min-h-0 bg-slate-950">
+          <div className="relative w-full lg:w-[35%] min-h-[300px] lg:min-h-0 bg-slate-950">
             {imgUrl && imgUrl.trim() !== "" ? (
-              <Image
-                src={imgUrl}
-                alt="Detection"
-                fill
-                className="object-contain p-4"
-                unoptimized
-                priority
-                sizes="(max-width: 1024px) 100vw, 60vw"
-              />
+              <>
+                <Image
+                  src={imgUrl}
+                  alt="Detection"
+                  fill
+                  className="object-contain p-4"
+                  unoptimized
+                  priority
+                  sizes="(max-width: 1024px) 100vw, 60vw"
+                  onLoad={(e) => {
+                    const img = e.currentTarget as HTMLImageElement;
+                    imgNaturalRef.current = { w: img.naturalWidth, h: img.naturalHeight };
+                    drawBboxes();
+                  }}
+                />
+                <canvas
+                  ref={canvasRef}
+                  className="absolute inset-0 pointer-events-none"
+                  style={{ width: '100%', height: '100%' }}
+                />
+              </>
             ) : (
               <div className="absolute inset-0 flex items-center justify-center">
                 <div className="text-center">
@@ -425,113 +490,83 @@ export default function ImageModal() {
             <div className="absolute top-4 right-4 w-6 h-6 border-t-2 border-r-2 border-cyan-500/60" />
             <div className="absolute bottom-4 left-4 w-6 h-6 border-b-2 border-l-2 border-cyan-500/60" />
             <div className="absolute bottom-4 right-4 w-6 h-6 border-b-2 border-r-2 border-cyan-500/60" />
+
           </div>
 
           {/* Right: Video & Color Details Panel */}
-          <div className="w-full lg:w-[480px] xl:w-[520px] border-t lg:border-t-0 lg:border-l border-slate-800/60 bg-slate-950/80 flex flex-col">
+          <div className="w-full lg:flex-1 border-t lg:border-t-0 lg:border-l border-slate-800/60 bg-slate-950/80 flex flex-col">
             
-            {/* Tabs */}
+            {/* Panel Header */}
             <div className="flex border-b border-slate-800/60">
-              <button
-                onClick={() => setActiveTab('colors')}
-                className={`flex-1 py-3 px-4 font-mono text-xs font-bold uppercase tracking-wider transition-colors
-                  ${activeTab === 'colors' 
-                    ? 'text-cyan-400 bg-cyan-950/30 border-b-2 border-cyan-500' 
-                    : 'text-slate-500 hover:text-slate-300'}`}
-              >
-                Color Analysis
-              </button>
-              <button
-                onClick={() => setActiveTab('details')}
-                className={`flex-1 py-3 px-4 font-mono text-xs font-bold uppercase tracking-wider transition-colors
-                  ${activeTab === 'details' 
-                    ? 'text-cyan-400 bg-cyan-950/30 border-b-2 border-cyan-500' 
-                    : 'text-slate-500 hover:text-slate-300'}`}
-              >
+              <div className="flex-1 py-3 px-4 font-mono text-xs font-bold uppercase tracking-wider text-cyan-400 bg-cyan-950/30 border-b-2 border-cyan-500">
                 Detection Details
-              </button>
+              </div>
             </div>
 
-            {/* Tab Content */}
+            {/* Panel Content */}
             <div className="flex-1 overflow-y-auto">
-              {activeTab === 'colors' ? (
-                <div className="p-4 space-y-4">
+              <div className="p-4 space-y-4">
                   {/* Detection Details Summary */}
                   <div className="bg-slate-900/60 rounded-lg p-3 border border-slate-800">
                     <h4 className="font-mono text-xs text-slate-500 uppercase tracking-wider mb-3">Detection Details</h4>
                     <div className="grid grid-cols-2 gap-2">
-                      <div className="px-3 py-2 bg-slate-800/50 rounded">
+                      <div className="px-3 py-2 bg-slate-800/50 rounded col-span-2">
                         <span className="font-mono text-[10px] text-slate-500 uppercase block">Camera</span>
                         <span className="font-mono text-sm text-cyan-400">{detectionDetail?.camera_name || imageTarget.camera_name}</span>
                       </div>
-                      {detectionDetail?.video_time_offset !== undefined ? (
-                        <>
-                          <div className="px-3 py-2 bg-slate-800/50 rounded col-span-1">
-                            <span className="font-mono text-[10px] text-slate-500 uppercase block">Time Offset</span>
-                            <span className="font-mono text-sm text-purple-400">{targetOffset.toFixed(2)}s</span>
-                          </div>
-                          <div className="px-3 py-2 bg-slate-800/50 rounded col-span-1">
-                            <span className="font-mono text-[10px] text-slate-500 uppercase block">Items</span>
-                            <span className="font-mono text-sm text-green-400">{items.length} detected</span>
-                          </div>
-                        </>
-                      ) : (
-                        <>
-                          <div className="px-3 py-2 bg-slate-800/50 rounded">
-                            <span className="font-mono text-[10px] text-slate-500 uppercase block">Time</span>
-                            <span className="font-mono text-sm text-slate-200">
-                              {new Date(detectionDetail?.timestamp || imageTarget.timestamp).toLocaleTimeString("en-GB")}
-                            </span>
-                          </div>
-                          <div className="px-3 py-2 bg-slate-800/50 rounded">
-                            <span className="font-mono text-[10px] text-slate-500 uppercase block">Date</span>
-                            <span className="font-mono text-sm text-slate-200">
-                              {new Date(detectionDetail?.timestamp || imageTarget.timestamp).toLocaleDateString("en-GB")}
-                            </span>
-                          </div>
-                          <div className="px-3 py-2 bg-slate-800/50 rounded">
-                            <span className="font-mono text-[10px] text-slate-500 uppercase block">Items</span>
-                            <span className="font-mono text-sm text-green-400">{items.length} detected</span>
-                          </div>
-                        </>
-                      )}
-                    </div>
-
-                    {/* Video Controls - Show when video_time_offset is available */}
-                    {detectionDetail?.video_time_offset !== undefined && (
-                      <div className="mt-3 pt-3 border-t border-slate-800/60">
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => adjustOffset(-1)}
-                            className="px-3 py-1.5 bg-slate-800 text-slate-300 font-mono text-xs font-bold rounded hover:bg-slate-700 transition-colors border border-slate-700"
-                          >
-                            &lt;
-                          </button>
-                          <button
-                            onClick={openVideoPopup}
-                            className="flex-1 py-2 bg-purple-600/30 text-purple-300 font-mono text-xs font-bold tracking-wider rounded hover:bg-purple-600/50 transition-colors border border-purple-500/50 flex justify-center items-center gap-2"
-                          >
-                            <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
-                              <path d="M8 5v14l11-7z" />
-                            </svg>
-                            PLAY VIDEO
-                          </button>
-                          <button
-                            onClick={() => adjustOffset(1)}
-                            className="px-3 py-1.5 bg-slate-800 text-slate-300 font-mono text-xs font-bold rounded hover:bg-slate-700 transition-colors border border-slate-700"
-                          >
-                            &gt;
-                          </button>
+                      <div className="px-3 py-2 bg-slate-800/50 rounded">
+                        <span className="font-mono text-[10px] text-slate-500 uppercase block">Timestamp</span>
+                        <span className="font-mono text-sm text-slate-200">
+                          {new Date(detectionDetail?.timestamp || imageTarget.timestamp).toLocaleString("en-GB")}
+                        </span>
+                      </div>
+                      {detectionDetail?.video_time_offset !== undefined && (
+                        <div className="px-3 py-2 bg-slate-800/50 rounded">
+                          <span className="font-mono text-[10px] text-slate-500 uppercase block">Time Offset</span>
+                          <span className="font-mono text-sm text-purple-400">{targetOffset.toFixed(2)}s</span>
                         </div>
+                      )}
+                      <div className="px-3 py-2 bg-slate-800/50 rounded">
+                        <span className="font-mono text-[10px] text-slate-500 uppercase block">Items</span>
+                        <span className="font-mono text-sm text-green-400">{items.length} detected</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Video Controls - Show when video_time_offset is available */}
+                  {detectionDetail?.video_time_offset !== undefined && (
+                    <div className="bg-slate-900/60 rounded-lg p-3 border border-slate-800">
+                      <div className="flex items-center gap-2">
                         <button
-                          onClick={resetOffset}
-                          className="w-full mt-2 py-1.5 bg-slate-800/50 text-slate-400 font-mono text-[10px] font-bold tracking-wider rounded hover:bg-slate-700/50 transition-colors border border-slate-700/50"
+                          onClick={() => adjustOffset(-1)}
+                          className="px-3 py-1.5 bg-slate-800 text-slate-300 font-mono text-xs font-bold rounded hover:bg-slate-700 transition-colors border border-slate-700"
                         >
-                          RESET OFFSET
+                          &lt;
+                        </button>
+                        <button
+                          onClick={openVideoPopup}
+                          className="flex-1 py-2 bg-purple-600/30 text-purple-300 font-mono text-xs font-bold tracking-wider rounded hover:bg-purple-600/50 transition-colors border border-purple-500/50 flex justify-center items-center gap-2"
+                        >
+                          <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
+                            <path d="M8 5v14l11-7z" />
+                          </svg>
+                          PLAY VIDEO
+                        </button>
+                        <button
+                          onClick={() => adjustOffset(1)}
+                          className="px-3 py-1.5 bg-slate-800 text-slate-300 font-mono text-xs font-bold rounded hover:bg-slate-700 transition-colors border border-slate-700"
+                        >
+                          &gt;
                         </button>
                       </div>
-                    )}
-                  </div>
+                      <button
+                        onClick={resetOffset}
+                        className="w-full mt-2 py-1.5 bg-slate-800/50 text-slate-400 font-mono text-[10px] font-bold tracking-wider rounded hover:bg-slate-700/50 transition-colors border border-slate-700/50"
+                      >
+                        RESET OFFSET
+                      </button>
+                    </div>
+                  )}
 
                   {/* Per-Item Color Details */}
                   <div className="space-y-3">
@@ -550,12 +585,23 @@ export default function ImageModal() {
                               </span>
                               <span className="font-mono text-sm font-bold text-slate-200">{item.class_name}</span>
                             </div>
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-2">
                               <span className="font-mono text-xs text-slate-500">conf:</span>
                               <span className={`font-mono text-xs font-bold
                                 ${item.confidence >= 0.8 ? 'text-green-400' : item.confidence >= 0.6 ? 'text-yellow-400' : 'text-orange-400'}`}>
                                 {(item.confidence * 100).toFixed(1)}%
                               </span>
+                              {item.bbox && item.bbox.length >= 4 && (
+                                <button
+                                  onClick={() => toggleBbox(item.id)}
+                                  className={`px-1.5 py-0.5 rounded font-mono text-[9px] font-bold uppercase tracking-wider border transition-colors
+                                    ${bboxVisible[item.id]
+                                      ? 'bg-cyan-600/30 border-cyan-500/60 text-cyan-300 hover:bg-cyan-600/50'
+                                      : 'bg-slate-800/60 border-slate-600/60 text-slate-400 hover:text-slate-200'}`}
+                                >
+                                  {bboxVisible[item.id] ? 'HIDE' : 'SHOW'} BOX
+                                </button>
+                              )}
                             </div>
                           </div>
 
@@ -652,38 +698,6 @@ export default function ImageModal() {
                     )}
                   </div>
                 </div>
-              ) : (
-                <div className="p-4 space-y-4">
-                  {/* Detection Details */}
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="bg-slate-900/60 rounded-lg p-3 border border-slate-800">
-                      <span className="font-mono text-xs text-slate-500 uppercase block mb-1">Camera</span>
-                      <p className="font-mono text-cyan-400 font-bold">{detectionDetail?.camera_name || imageTarget.camera_name}</p>
-                    </div>
-                    <div className="bg-slate-900/60 rounded-lg p-3 border border-slate-800">
-                      <span className="font-mono text-xs text-slate-500 uppercase block mb-1">Timestamp</span>
-                      <p className="font-mono text-slate-200 text-sm">
-                        {new Date(detectionDetail?.timestamp || imageTarget.timestamp).toLocaleString("en-GB")}
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Open Video */}
-                  {detectionDetail?.video_id && (
-                    <button
-                      onClick={openVideoPopup}
-                      className="w-full py-3 bg-purple-600/30 border border-purple-500/50 rounded-lg
-                        font-mono text-xs font-bold tracking-wider text-purple-300
-                        hover:bg-purple-600/50 transition-colors flex items-center justify-center gap-2"
-                    >
-                      <svg viewBox="0 0 24 24" fill="currentColor" className="w-4 h-4">
-                        <path d="M8 5v14l11-7z"/>
-                      </svg>
-                      OPEN VIDEO
-                    </button>
-                  )}
-                </div>
-              )}
             </div>
           </div>
         </div>

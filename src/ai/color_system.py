@@ -615,39 +615,41 @@ def get_foreground_mask(img):
 # 🔧 ฟังก์ชันวิเคราะห์สีละเอียด
 # ============================================
 
-def analyze_detailed_colors(image_crop, return_map=False):
+def analyze_detailed_colors(image_crop, return_map=False, remove_bg=True):
     """
     วิเคราะห์สีแบบละเอียด (Detailed Color Analysis)
     สำหรับการ tracking ที่ต้องการความแม่นยำสูง
-    พร้อมตัด background ออก
-    
+
     Args:
         image_crop: ภาพ crop ของคน/เสื้อผ้า
         return_map: คืนค่า map ภาพสีหรือไม่
-    
+        remove_bg: ถ้า True จะตัด background ออกก่อนนับสี (default True)
+                   ปิดได้จาก system_settings.json → processing.color_remove_background
+
     Returns:
         dict: ชื่อสีละเอียดและเปอร์เซ็นต์ (sums to 100%)
     """
     if image_crop is None or image_crop.size == 0:
         return ({}, None) if return_map else {}
-    
+
     h, w = image_crop.shape[:2]
     if h < 20 or w < 20:
         return ({}, None) if return_map else {}
-    
+
     # ย่อภาพเพื่อความเร็ว
     small_img = cv2.resize(image_crop, (64, 64))
-    
-    # ตัด background
-    fg_mask = get_foreground_mask(small_img)
-    
-    # ดึงเฉพาะ pixel ที่เป็น foreground
-    bgr_fg = small_img[fg_mask == 1]
-    
-    # ถ้าโดนตัดหายเกลี้ยงเพราะสีกลืนกันมาก ให้ใช้ภาพทั้งกรอบแทน
-    if len(bgr_fg) < 50:
-        bgr_fg = small_img.reshape(-1, 3)
+
+    if remove_bg:
+        # ตัด background แล้วดึงเฉพาะ pixel ที่เป็น foreground
+        fg_mask = get_foreground_mask(small_img)
+        bgr_fg = small_img[fg_mask == 1]
+        # ถ้าโดนตัดหายเกลี้ยงเพราะสีกลืนกัน ให้ใช้ภาพทั้งกรอบแทน
+        if len(bgr_fg) < 50:
+            bgr_fg = small_img.reshape(-1, 3)
+            fg_mask = np.ones((64, 64), dtype=np.uint8)
+    else:
         fg_mask = np.ones((64, 64), dtype=np.uint8)
+        bgr_fg = small_img.reshape(-1, 3)
     
     # แปลงเป็น HSV
     hsv_img = cv2.cvtColor(small_img, cv2.COLOR_BGR2HSV)

@@ -30,6 +30,7 @@ from src.api.routes.log_manager import router as log_manager_router
 from src.api.routes.dashboard_api import router as dashboard_api_router
 from src.api.routes.video_queue import router as video_queue_router
 from src.api.routes.json_controller import router as json_controller_router
+from src.api.routes.test_api import router as test_api_router
 from src.config_loader import get_storage_mode
 from src.services.json_investigation_service import JsonInvestigationService
 from src.services.database import DatabaseService
@@ -140,6 +141,9 @@ app.include_router(video_queue_router, tags=["Video Queue"])
 
 # 9. JSON Storage API (file-backed result mode)
 app.include_router(json_controller_router)
+
+# 10. Test / Debug API
+app.include_router(test_api_router, tags=["Test"])
 
 # 2. ลงทะเบียน Router เดิม (Search, Stats, etc.)
 # (สมมติว่าคุณแยก route ของ detection ไว้ในไฟล์อื่นก็ include มาแบบเดียวกัน)

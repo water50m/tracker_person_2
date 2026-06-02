@@ -36,5 +36,8 @@
     "device": "cuda",
     "batch_size": 32,
     "num_workers": 4
+  },
+  "processing": {
+    "color_remove_background": true
   }
 }

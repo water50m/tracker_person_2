@@ -266,7 +266,7 @@ export default function RealtimeTab() {
       } catch (err) {
         console.error("[Realtime] Failed to fetch background status:", err);
       }
-    }, 600000); // 10 minutes
+    }, 2000);
 
     return () => clearInterval(pollInterval);
   }, [backgroundTaskId, isStreaming, displayMode, backendUrl]);
@@ -760,36 +760,26 @@ export default function RealtimeTab() {
         setIsStreaming(true);
         setVideoEnded(false);
 
-        // Start monitoring for video end - check both error and active streams
+        // Poll status endpoint to detect natural stream end
         const streamStartedAt = Date.now();
         videoEndCheckRef.current = setInterval(async () => {
-          const img = document.querySelector('img[src*="stream-analyze"]') as HTMLImageElement;
-          if (img) {
-            img.onerror = () => {
-              console.log("Stream ended - video completed (error)");
-              finishWebStream();
-            };
-          }
-
-          // Also poll active streams to detect natural stream end
           const currentStreamId = activeStreamId;
-          if (currentStreamId) {
-            try {
-              const activeResponse = await fetch(`${backendUrl}/api/video/stream-analyze/active`);
-              if (activeResponse.ok) {
-                const data = await activeResponse.json();
-                const activeStreams = data.active_streams ?? [];
-                const isStillActive = activeStreams.includes(currentStreamId);
-                const fallbackStillHasAnyStream = !streamPreflightSupported && activeStreams.length > 0;
-                const withinStartupGrace = Date.now() - streamStartedAt < 3000;
-                if (!isStillActive && !fallbackStillHasAnyStream && !withinStartupGrace) {
-                  console.log("Stream ended - video completed (inactive)");
-                  finishWebStream();
-                }
+          if (!currentStreamId) return;
+          const withinStartupGrace = Date.now() - streamStartedAt < 3000;
+          if (withinStartupGrace) return;
+          try {
+            const statusResponse = await fetch(
+              `${backendUrl}/api/video/stream-analyze/${currentStreamId}/status`
+            );
+            if (statusResponse.ok) {
+              const data = await statusResponse.json();
+              if (data.status === "completed") {
+                console.log("Stream ended - status: completed, job_id:", data.job_id);
+                finishWebStream();
               }
-            } catch (err) {
-              // Silently ignore polling errors
             }
+          } catch {
+            // Silently ignore polling errors
           }
         }, 2000);
       } else if (displayMode === "cv2") {

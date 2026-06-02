@@ -135,6 +135,12 @@ def get_json_storage_index() -> str:
     return config.get("storage", {}).get("json_index", "track_result/json_jobs/index.json")
 
 
+def get_color_remove_background() -> bool:
+    """Whether to run BG removal (rembg / GrabCut) before color analysis."""
+    config = load_config()
+    return bool(config.get("processing", {}).get("color_remove_background", True))
+
+
 def reload_config() -> Dict[str, Any]:
     """Force reload configuration from disk."""
     return load_config(force_reload=True)

@@ -60,6 +60,9 @@ class StorageUpdate(BaseModel):
     json_root: str | None = None
     json_index: str | None = None
 
+class ProcessingUpdate(BaseModel):
+    color_remove_background: bool | None = None
+
 class SettingsUpdate(BaseModel):
     paths: PathsUpdate | None = None
     models: ModelsUpdate | None = None
@@ -67,6 +70,7 @@ class SettingsUpdate(BaseModel):
     tracking: TrackingUpdate | None = None
     system: SystemUpdate | None = None
     storage: StorageUpdate | None = None
+    processing: ProcessingUpdate | None = None
 
 
 # ─── Endpoints ───────────────────────────────────────────────
