@@ -50,10 +50,6 @@
   50% { box-shadow: 0 0 15px #39ff14, 0 0 30px #39ff1460; }
 }
 
-@keyframes scan-line {
-  0% { transform: translateY(-100%); }
-  100% { transform: translateY(100vh); }
-}
 
 @keyframes flicker {
   0%, 95%, 100% { opacity: 1; }

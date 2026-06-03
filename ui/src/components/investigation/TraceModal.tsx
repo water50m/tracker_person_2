@@ -246,9 +246,6 @@ function ModalBody({
           <div className="absolute inset-0 pointer-events-none border border-pink-500/20" />
           <div className="absolute top-1.5 left-1.5 w-3 h-3 border-t-2 border-l-2 border-pink-400/60" />
           <div className="absolute bottom-1.5 right-1.5 w-3 h-3 border-b-2 border-r-2 border-pink-400/60" />
-          {/* Scanlines */}
-          <div className="absolute inset-0 pointer-events-none"
-            style={{ background: "repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.08) 3px,rgba(0,0,0,0.08) 4px)" }} />
           {/* Action buttons */}
           <div className="absolute bottom-2 left-2 right-2 flex gap-1">
             <button 

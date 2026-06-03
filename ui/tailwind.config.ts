@@ -29,7 +29,6 @@ const config: Config = {
         "slide-in-right": "slide-in-right 0.3s ease-out forwards",
         "slide-in-up": "slide-in-up 0.4s ease-out forwards",
         "fade-in": "fade-in 0.3s ease-out forwards",
-        "scan-line": "scan-line 4s linear infinite",
       },
       backdropBlur: {
         xs: "2px",

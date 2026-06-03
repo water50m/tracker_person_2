@@ -482,9 +482,6 @@ export default function ImageModal() {
                 </div>
               </div>
             )}
-            {/* Scan line overlay */}
-            <div className="absolute inset-0 pointer-events-none opacity-30"
-              style={{ background: "repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.15) 2px,rgba(0,0,0,0.15) 4px)" }} />
             {/* Corner brackets */}
             <div className="absolute top-4 left-4 w-6 h-6 border-t-2 border-l-2 border-cyan-500/60" />
             <div className="absolute top-4 right-4 w-6 h-6 border-t-2 border-r-2 border-cyan-500/60" />

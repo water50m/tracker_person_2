@@ -185,13 +185,6 @@ function ResultCard({
         )}
       </div>
 
-      {/* Scanline */}
-      <div
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          background: "repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.07) 3px,rgba(0,0,0,0.07) 4px)",
-        }}
-      />
 
       {/* Track ID (top-left) */}
       {result.track_id != null && (

@@ -319,13 +319,6 @@ function EventCard({ event }: { event: FeedEvent }) {
           className="object-cover"
           unoptimized
         />
-        {/* Scanline */}
-        <div
-          className="absolute inset-0 pointer-events-none"
-          style={{
-            background: "repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.12) 3px,rgba(0,0,0,0.12) 4px)",
-          }}
-        />
       </div>
 
       {/* Content */}

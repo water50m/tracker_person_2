@@ -473,13 +473,6 @@ export default function LiveVideoCanvas() {
               </div>
             </div>
 
-            {/* Scanning Overlay Effect */}
-            <div
-              className="absolute inset-0 pointer-events-none opacity-20"
-              style={{
-                background: "repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.4) 2px,rgba(0,0,0,0.4) 4px)",
-              }}
-            />
 
             {/* Detection Cards Overlay (Right Side) */}
             {selectedCamera.is_processing && detections.length > 0 && (
