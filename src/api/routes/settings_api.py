@@ -63,6 +63,13 @@ class StorageUpdate(BaseModel):
 class ProcessingUpdate(BaseModel):
     color_remove_background: bool | None = None
 
+class StreamUpdate(BaseModel):
+    frame_skip_mode: str | None = None   # "none" | "fixed" | "auto"
+    frame_skip_n: int | None = None
+    target_fps: int | None = None
+    buffer_size: int | None = None
+    ai_frame_skip: int | None = None
+
 class SettingsUpdate(BaseModel):
     paths: PathsUpdate | None = None
     models: ModelsUpdate | None = None
@@ -71,6 +78,7 @@ class SettingsUpdate(BaseModel):
     system: SystemUpdate | None = None
     storage: StorageUpdate | None = None
     processing: ProcessingUpdate | None = None
+    stream: StreamUpdate | None = None
 
 
 # ─── Endpoints ───────────────────────────────────────────────
@@ -134,13 +142,17 @@ async def update_settings(body: SettingsUpdate):
             raise HTTPException(status_code=400, detail="storage.mode must be 'db' or 'json'")
         storage_update["mode"] = mode
     
-    # Apply nested updates
+    # Apply nested updates — create section if it doesn't exist yet
     for section, values in update.items():
-        if section in cfg and isinstance(cfg[section], dict) and values:
+        if not values:
+            continue
+        if isinstance(values, dict):
+            if section not in cfg or not isinstance(cfg[section], dict):
+                cfg[section] = {}
             cfg[section].update(values)
-        elif section == "storage" and values:
+        else:
             cfg[section] = values
-    
+
     save_config(cfg)
     return {"status": "saved", "config": cfg}
 

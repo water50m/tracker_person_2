@@ -39,5 +39,12 @@
   },
   "processing": {
     "color_remove_background": true
+  },
+  "stream": {
+    "frame_skip_mode": "none",
+    "frame_skip_n": 2,
+    "target_fps": 15,
+    "buffer_size": 1,
+    "ai_frame_skip": 5
   }
 }

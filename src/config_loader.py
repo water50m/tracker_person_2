@@ -135,6 +135,13 @@ def get_json_storage_index() -> str:
     return config.get("storage", {}).get("json_index", "track_result/json_jobs/index.json")
 
 
+def get_stream_config() -> dict:
+    """Get stream relay config: frame_skip_mode, frame_skip_n, target_fps, buffer_size."""
+    config = load_config()
+    defaults = {"frame_skip_mode": "auto", "frame_skip_n": 2, "target_fps": 15, "buffer_size": 1}
+    return {**defaults, **config.get("stream", {})}
+
+
 def get_color_remove_background() -> bool:
     """Whether to run BG removal (rembg / GrabCut) before color analysis."""
     config = load_config()

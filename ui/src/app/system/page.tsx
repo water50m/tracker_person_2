@@ -3,6 +3,14 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── Types ────────────────────────────────────────────────────
+interface StreamConfig {
+    frame_skip_mode: "none" | "fixed" | "auto";
+    frame_skip_n: number;
+    target_fps: number;
+    buffer_size: number;
+    ai_frame_skip: number;
+}
+
 interface SystemConfig {
     detector_model: string;
     classifier_model: string;
@@ -14,6 +22,7 @@ interface SystemConfig {
     classification_enabled: boolean;
     // nested sections (come from backend config as-is)
     processing?: { color_remove_background?: boolean };
+    stream?: StreamConfig;
 }
 
 interface HardwareInfo {
@@ -46,7 +55,7 @@ interface ModelFile {
     size_mb: number;
 }
 
-type Tab = "MODELS" | "DETECTION" | "SYSTEM" | "DATABASE" | "TEST";
+type Tab = "MODELS" | "DETECTION" | "STREAM" | "SYSTEM" | "DATABASE" | "TEST";
 
 const TAB_KEYS: Record<string, (keyof SystemConfig)[]> = {
     MODELS: ["detector_model", "classifier_model", "detection_enabled", "classification_enabled"],
@@ -187,7 +196,7 @@ export default function SystemPage() {
         }
     };
 
-    const tabs: Tab[] = ["MODELS", "DETECTION", "SYSTEM", "DATABASE", "TEST"];
+    const tabs: Tab[] = ["MODELS", "DETECTION", "STREAM", "SYSTEM", "DATABASE", "TEST"];
 
     return (
         <div className="flex flex-col h-screen bg-slate-950 text-slate-300 overflow-hidden">
@@ -288,6 +297,7 @@ export default function SystemPage() {
                                 resetting={resetting}
                             />
                         )}
+                        {activeTab === "STREAM" && <StreamTab draft={draft} setDraft={setDraft} />}
                         {activeTab === "SYSTEM" && <SystemTab data={data} draft={draft} setDraft={setDraft} />}
                         {activeTab === "DATABASE" && <DatabaseTab />}
                         {activeTab === "TEST" && <TestTab backendUrl={backendUrl} />}
@@ -479,6 +489,230 @@ function DetectionTab({
             </div>
             <ResetTabBar label="DETECTION TAB" onReset={onResetTab} resetting={resetting} />
         </>
+    );
+}
+
+// ─── Tab: Stream Config ───────────────────────────────────────
+function StreamTab({
+    draft,
+    setDraft,
+}: {
+    draft: Partial<SystemConfig>;
+    setDraft: React.Dispatch<React.SetStateAction<Partial<SystemConfig>>>;
+}) {
+    const stream: StreamConfig = {
+        frame_skip_mode: "auto",
+        frame_skip_n: 2,
+        target_fps: 15,
+        buffer_size: 1,
+        ai_frame_skip: 5,
+        ...(draft.stream ?? {}),
+    };
+
+    const set = (patch: Partial<StreamConfig>) =>
+        setDraft((d) => ({ ...d, stream: { ...stream, ...patch } }));
+
+    const mode = stream.frame_skip_mode;
+
+    return (
+        <div className="grid grid-cols-2 gap-6 w-full">
+            {/* Frame Skip Mode */}
+            <SettingsCard title="FRAME SKIP MODE">
+                <p className="font-mono text-[10px] text-slate-500 leading-relaxed mb-4">
+                    ควบคุมว่า backend จะประมวลผล frame ไหนก่อนส่งมาแสดง<br />
+                    มีผลเฉพาะ live stream ที่ยังไม่ได้กด START AI
+                </p>
+                <div className="flex flex-col gap-3">
+                    {(["none", "fixed", "auto"] as const).map((m) => (
+                        <ModeCard
+                            key={m}
+                            active={mode === m}
+                            onClick={() => set({ frame_skip_mode: m })}
+                            label={m === "none" ? "NONE — ไม่ skip" : m === "fixed" ? "FIXED — skip ตายตัว" : "AUTO — skip อัตโนมัติ"}
+                            badge={m === "auto" ? "แนะนำ" : undefined}
+                            description={
+                                m === "none"
+                                    ? "ส่งทุก frame เรียงลำดับ ไม่ข้ามเลย ได้ภาพลื่นสุด แต่ delay จะเพิ่มถ้า decode ไม่ทันกับ FPS ต้นทาง"
+                                    : m === "fixed"
+                                    ? `เอา 1 ใน ${stream.frame_skip_n} frame เสมอ เช่น N=2 คือเอา frame 1, 3, 5... frame คู่ถูกข้ามทิ้ง ใช้เมื่อรู้ว่า hardware ทำได้แค่ไหน`
+                                    : "วัดความเร็ว decode จริงแล้วล้าง buffer ทิ้งก่อนอ่าน frame ใหม่เสมอ ได้ frame ปัจจุบันที่สุด delay ต่ำสุด แต่ภาพอาจกระตุกเล็กน้อย"
+                            }
+                        />
+                    ))}
+                </div>
+            </SettingsCard>
+
+            {/* Parameters */}
+            <div className="flex flex-col gap-6">
+                {/* Fixed N — แสดงเฉพาะ fixed mode */}
+                <SettingsCard title="FIXED SKIP — N (frame)">
+                    <div className={`transition-opacity ${mode === "fixed" ? "opacity-100" : "opacity-30 pointer-events-none"}`}>
+                        <SliderField
+                            label="SKIP EVERY N FRAMES"
+                            description={`เอา 1 ใน ${stream.frame_skip_n} frame | ใช้ได้เฉพาะ mode = FIXED`}
+                            value={stream.frame_skip_n}
+                            min={1} max={10} step={1}
+                            display={(v) => `N = ${v}`}
+                            onChange={(v) => set({ frame_skip_n: v })}
+                        />
+                        <InfoBox color="blue">
+                            N=1 คือเอาทุก frame (= none), N=3 คือเอา frame ที่ 1, 4, 7, 10...
+                            ยิ่ง N มาก ยิ่ง CPU ต่ำ แต่ภาพกระตุกมากขึ้น
+                        </InfoBox>
+                    </div>
+                    {mode !== "fixed" && (
+                        <p className="font-mono text-[10px] text-slate-600">เปิดใช้เมื่อเลือก mode = FIXED</p>
+                    )}
+                </SettingsCard>
+
+                {/* Target FPS — แสดงเฉพาะ auto mode */}
+                <SettingsCard title="AUTO TARGET FPS">
+                    <div className={`transition-opacity ${mode === "auto" ? "opacity-100" : "opacity-30 pointer-events-none"}`}>
+                        <SliderField
+                            label="TARGET OUTPUT FPS"
+                            description={`ส่งภาพไปหน้าบ้านที่ ~${stream.target_fps} fps | ใช้ได้เฉพาะ mode = AUTO`}
+                            value={stream.target_fps}
+                            min={1} max={30} step={1}
+                            display={(v) => `${v} fps`}
+                            onChange={(v) => set({ target_fps: v })}
+                        />
+                        <InfoBox color="green">
+                            ระบบจะล้าง queue ก่อนอ่าน frame ใหม่เสมอ แล้ว rate-limit ที่ค่านี้
+                            ค่าแนะนำ 15 fps — สมดุลระหว่าง latency และ CPU load
+                        </InfoBox>
+                    </div>
+                    {mode !== "auto" && (
+                        <p className="font-mono text-[10px] text-slate-600">เปิดใช้เมื่อเลือก mode = AUTO</p>
+                    )}
+                </SettingsCard>
+
+                {/* Buffer Size */}
+                <SettingsCard title="OPENCV BUFFER SIZE">
+                    <SliderField
+                        label="CAP_PROP_BUFFERSIZE"
+                        description="จำนวน frame ที่ OpenCV เก็บไว้รอใน internal queue"
+                        value={stream.buffer_size}
+                        min={1} max={10} step={1}
+                        display={(v) => `${v} frame`}
+                        onChange={(v) => set({ buffer_size: v })}
+                    />
+                    <InfoBox color="amber">
+                        ค่า 1 = buffer น้อยสุด delay ต่ำสุด แต่อาจ drop frame ถ้า network ไม่เสถียร
+                        ค่า 4-10 = smooth กว่า แต่ delay เพิ่ม ~100-300ms
+                    </InfoBox>
+                </SettingsCard>
+
+                {/* AI Frame Skip */}
+                <SettingsCard title="AI PROCESSING — FRAME SKIP">
+                    <SliderField
+                        label="AI FRAME SKIP"
+                        description="ประมวลผล AI ทุก N frame (ใช้กับ START NEW บน dashboard)"
+                        value={stream.ai_frame_skip}
+                        min={1} max={30} step={1}
+                        display={(v) => `N = ${v}`}
+                        onChange={(v) => set({ ai_frame_skip: v })}
+                    />
+                    <InfoBox color="blue">
+                        N=1 = ทุก frame (หนัก), N=5 = ~6fps จาก 30fps (แนะนำ), N=10 = ~3fps (เบา)
+                        ยิ่ง N น้อย ยิ่ง detect ถี่ แต่ใช้ GPU/CPU มากขึ้น
+                    </InfoBox>
+                </SettingsCard>
+            </div>
+
+            {/* Summary */}
+            <div className="col-span-2">
+                <SettingsCard title="CURRENT CONFIG SUMMARY">
+                    <div className="grid grid-cols-5 gap-4">
+                        <SummaryCell label="MODE" value={mode.toUpperCase()} color="text-cyan-400" />
+                        <SummaryCell
+                            label={mode === "fixed" ? "SKIP N" : "TARGET FPS"}
+                            value={mode === "fixed" ? `N = ${stream.frame_skip_n}` : mode === "auto" ? `${stream.target_fps} fps` : "—"}
+                            color="text-orange-400"
+                        />
+                        <SummaryCell label="BUFFER" value={`${stream.buffer_size} frame`} color="text-slate-300" />
+                        <SummaryCell label="AI SKIP" value={`N = ${stream.ai_frame_skip}`} color="text-purple-400" />
+                        <SummaryCell
+                            label="EST. LATENCY"
+                            value={
+                                mode === "none"
+                                    ? "สูง (ตาม queue)"
+                                    : mode === "fixed"
+                                    ? `~${Math.round((stream.frame_skip_n / 30) * 1000)}ms`
+                                    : `~${Math.round(1000 / stream.target_fps)}ms`
+                            }
+                            color="text-green-400"
+                        />
+                    </div>
+                </SettingsCard>
+            </div>
+        </div>
+    );
+}
+
+function ModeCard({
+    active, onClick, label, badge, description,
+}: {
+    active: boolean; onClick: () => void; label: string; badge?: string; description: string;
+}) {
+    const [open, setOpen] = React.useState(false);
+    return (
+        <div
+            onClick={onClick}
+            className={`border rounded-sm p-3 cursor-pointer transition-all ${
+                active
+                    ? "border-cyan-500/60 bg-cyan-950/20"
+                    : "border-slate-700 bg-slate-900/30 hover:border-slate-600"
+            }`}
+        >
+            <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                    <div className={`w-3 h-3 rounded-full border-2 flex-shrink-0 transition-all ${
+                        active ? "border-cyan-400 bg-cyan-400" : "border-slate-600"
+                    }`} />
+                    <span className={`font-mono text-xs font-bold tracking-widest ${active ? "text-cyan-300" : "text-slate-400"}`}>
+                        {label}
+                    </span>
+                    {badge && (
+                        <span className="font-mono text-[9px] px-1.5 py-0.5 rounded-sm bg-green-900/40 border border-green-700/40 text-green-400">
+                            {badge}
+                        </span>
+                    )}
+                </div>
+                <button
+                    onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+                    className="font-mono text-[9px] text-slate-600 hover:text-slate-400 border border-slate-700 hover:border-slate-600 px-2 py-0.5 rounded-sm transition-all"
+                >
+                    {open ? "ซ่อน ▲" : "คำอธิบาย ▼"}
+                </button>
+            </div>
+            {open && (
+                <p className="font-mono text-[10px] text-slate-400 leading-relaxed mt-2 pl-6 border-l border-slate-700">
+                    {description}
+                </p>
+            )}
+        </div>
+    );
+}
+
+function InfoBox({ color, children }: { color: "blue" | "green" | "amber"; children: React.ReactNode }) {
+    const styles = {
+        blue: "border-blue-800/40 bg-blue-950/20 text-blue-300",
+        green: "border-green-800/40 bg-green-950/20 text-green-300",
+        amber: "border-amber-700/40 bg-amber-950/20 text-amber-300",
+    };
+    return (
+        <p className={`font-mono text-[10px] leading-relaxed border rounded-sm px-3 py-2 mt-3 ${styles[color]}`}>
+            {children}
+        </p>
+    );
+}
+
+function SummaryCell({ label, value, color }: { label: string; value: string; color: string }) {
+    return (
+        <div className="border border-slate-800 bg-slate-900/40 rounded-sm p-3 text-center">
+            <p className="font-mono text-[9px] text-slate-600 tracking-widest mb-1">{label}</p>
+            <p className={`font-mono text-sm font-bold ${color}`}>{value}</p>
+        </div>
     );
 }
 

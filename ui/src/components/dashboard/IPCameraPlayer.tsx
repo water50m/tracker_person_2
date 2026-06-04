@@ -39,19 +39,63 @@ export default function IPCameraPlayer({ src, className }: IPCameraPlayerProps) 
     return 'unknown';
   })();
 
-  // Return loading state immediately if still loading
+  const loadingOverlay = (
+    <div className="absolute inset-0 flex items-center justify-center bg-slate-900">
+      <div className="text-center">
+        <div className="w-6 h-6 border-2 border-cyan-500/30 border-t-cyan-400 rounded-full animate-spin mx-auto mb-2" />
+        <p className="font-mono text-xs text-cyan-400">
+          {streamType === 'image' ? 'CONNECTING TO IP WEBCAM APP' : 'CONNECTING TO IP CAMERA'}
+        </p>
+        <p className="font-mono text-[8px] text-slate-600 mt-1">
+          {streamType === 'image' ? 'IMAGE REFRESH MODE' : streamType.toUpperCase() + ' STREAM'}
+        </p>
+      </div>
+    </div>
+  );
+
+  // Handle MJPEG streams (display as img element) — render immediately so onLoad can fire
+  if (streamType === 'mjpeg') {
+    return (
+      <div className={`relative ${className}`} style={{ width: '100%', height: '100%' }}>
+        {isLoading && loadingOverlay}
+        <img
+          src={src}
+          alt="IP Camera MJPEG Stream"
+          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+          onLoad={() => setIsLoading(false)}
+          onError={() => {
+            setError('Failed to load MJPEG stream');
+            setIsLoading(false);
+          }}
+        />
+      </div>
+    );
+  }
+
+  // Handle IP Webcam app single image with refresh — render immediately
+  if (streamType === 'image') {
+    return (
+      <div className={`relative ${className}`} style={{ width: '100%', height: '100%' }}>
+        {isLoading && loadingOverlay}
+        <img
+          src={imageUrl}
+          alt="IP Webcam App"
+          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+          onLoad={() => setIsLoading(false)}
+          onError={() => {
+            setError('Failed to load IP Webcam image');
+            setIsLoading(false);
+          }}
+        />
+      </div>
+    );
+  }
+
+  // For non-image stream types, show loading overlay until ready
   if (isLoading) {
     return (
       <div className={`flex items-center justify-center bg-slate-900 ${className}`}>
-        <div className="text-center">
-          <div className="w-6 h-6 border-2 border-cyan-500/30 border-t-cyan-400 rounded-full animate-spin mx-auto mb-2" />
-          <p className="font-mono text-xs text-cyan-400">
-            {streamType === 'image' ? 'CONNECTING TO IP WEBCAM APP' : 'CONNECTING TO IP CAMERA'}
-          </p>
-          <p className="font-mono text-[8px] text-slate-600 mt-1">
-            {streamType === 'image' ? 'IMAGE REFRESH MODE' : streamType.toUpperCase() + ' STREAM'}
-          </p>
-        </div>
+        {loadingOverlay}
       </div>
     );
   }
@@ -68,7 +112,7 @@ export default function IPCameraPlayer({ src, className }: IPCameraPlayerProps) 
     }
 
     const video = videoRef.current;
-    if (!video || (streamType !== 'direct' && streamType !== 'mjpeg')) return;
+    if (!video || streamType !== 'direct') return;
 
     const handleCanPlay = () => {
       setIsLoading(false);
@@ -107,61 +151,10 @@ export default function IPCameraPlayer({ src, className }: IPCameraPlayerProps) 
     };
   }, [src]);
 
-  // Handle IP Webcam app image refresh
-  useEffect(() => {
-    if (streamType === 'image') {
-      const interval = setInterval(() => {
-        // Add timestamp to prevent caching
-        const timestamp = Date.now();
-        const baseUrl = src.split('?')[0];
-        setImageUrl(`${baseUrl}?t=${timestamp}`);
-      }, 100); // Refresh every 100ms for smooth video-like effect
+  // image type is handled above with early return — this effect is unused
+  useEffect(() => {}, [src, streamType]);
 
-      return () => clearInterval(interval);
-    }
-  }, [src, streamType]);
 
-  // Handle MJPEG streams (display as img element)
-  if (streamType === 'mjpeg') {
-    return (
-      <img
-        src={src}
-        alt="IP Camera MJPEG Stream"
-        className={className}
-        style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-        onLoad={() => {
-          setIsLoading(false);
-          // console.log(`[IPCameraPlayer] ✅ MJPEG stream ready for ${src}`);
-        }}
-        onError={(e) => {
-          setError('Failed to load MJPEG stream');
-          setIsLoading(false);
-          console.error(`[IPCameraPlayer] ❌ MJPEG stream error for ${src}`);
-        }}
-      />
-    );
-  }
-
-  // Handle IP Webcam app single image with refresh
-  if (streamType === 'image') {
-    return (
-      <img
-        src={imageUrl}
-        alt="IP Webcam App"
-        className={className}
-        style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-        onLoad={() => {
-          setIsLoading(false);
-          // console.log(`[IPCameraPlayer] ✅ IP Webcam image ready for ${src}`);
-        }}
-        onError={(e) => {
-          setError('Failed to load IP Webcam image');
-          setIsLoading(false);
-          console.error(`[IPCameraPlayer] ❌ IP Webcam image error for ${src}`);
-        }}
-      />
-    );
-  }
 
   if (error) {
     return (

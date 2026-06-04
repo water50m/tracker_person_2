@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 
 import HlsVideoPlayer from "./HlsVideoPlayer";
 import IPCameraPlayer from "./IPCameraPlayer";
@@ -76,6 +76,7 @@ export default function LiveVideoCanvas() {
   const [isStartingAI, setIsStartingAI] = useState(false);
   const [isStoppingAI, setIsStoppingAI] = useState(false);
   const [frameTiming, setFrameTiming] = useState<string>("");
+  const [showAISettings, setShowAISettings] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const streamKeyRef = useRef<number>(Date.now()); // Used to force image reload if needed
@@ -320,9 +321,24 @@ export default function LiveVideoCanvas() {
                   </svg>
                   <span>RESUME</span>
                 </button>
+                {/* AI Settings gear button */}
+                <button
+                  onClick={() => setShowAISettings(true)}
+                  className="p-1 text-slate-500 hover:text-cyan-400 border border-transparent hover:border-slate-700 rounded transition-all"
+                  title="AI Processing Settings"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-4 h-4">
+                    <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
+                    <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+                  </svg>
+                </button>
               </div>
             )}
           </span>
+          {/* AI Settings Modal — rendered outside toolbar flow */}
+          {showAISettings && (
+            <AISettingsModal onClose={() => setShowAISettings(false)} />
+          )}
           <button
             onClick={() => setIsFullscreen((s) => !s)}
             className="p-1 hover:text-cyan-400 text-slate-600 transition-colors"
@@ -434,19 +450,16 @@ export default function LiveVideoCanvas() {
                   );
                 }
 
-                // Check for IP camera URLs
+                // Check for IP camera URLs — always relay through backend to avoid CORS
                 if (isIPCameraUrl(selectedCamera.source_url)) {
-                  if (selectedCamera.source_url.toLowerCase().startsWith("rtsp://")) {
-                    return (
-                      <img
-                        key={`raw-${selectedCamera.id}-${streamKeyRef.current}`}
-                        src={`/api/dashboard/mjpeg/${selectedCamera.id}`}
-                        alt="RTSP relay stream"
-                        className="w-full h-full object-contain"
-                      />
-                    );
-                  }
-                  return <IPCameraPlayer src={selectedCamera.source_url} className="w-full h-full" />;
+                  return (
+                    <img
+                      key={`raw-${selectedCamera.id}-${streamKeyRef.current}`}
+                      src={`/api/dashboard/mjpeg/${selectedCamera.id}`}
+                      alt="IP camera relay stream"
+                      className="w-full h-full object-contain"
+                    />
+                  );
                 }
 
                 // Other source types fallback (.m3u8 or .mp4)
@@ -601,4 +614,124 @@ function LiveTimestamp() {
     return () => clearInterval(t);
   }, []);
   return <span>{ts}</span>;
+}
+
+// ─── AI Settings Modal ────────────────────────────────────────
+function AISettingsModal({ onClose }: { onClose: () => void }) {
+  const [aiFrameSkip, setAiFrameSkip] = useState<number>(5);
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const backendUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000").replace("://localhost:", "://127.0.0.1:");
+
+  useEffect(() => {
+    fetch(`${backendUrl}/api/settings`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        const skip = d?.config?.stream?.ai_frame_skip;
+        if (typeof skip === "number") setAiFrameSkip(skip);
+      })
+      .catch(() => {});
+  }, [backendUrl]);
+
+  const handleSave = async () => {
+    setSaving(true);
+    setMsg(null);
+    try {
+      const res = await fetch(`${backendUrl}/api/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stream: { ai_frame_skip: aiFrameSkip } }),
+      });
+      setMsg(res.ok ? "✓ SAVED" : "✗ FAILED");
+    } catch {
+      setMsg("✗ ERROR");
+    } finally {
+      setSaving(false);
+      setTimeout(() => setMsg(null), 2000);
+    }
+  };
+
+  const estFps = Math.round(30 / aiFrameSkip * 10) / 10;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="bg-slate-950 border border-cyan-900/60 rounded-sm shadow-2xl w-80 p-5 flex flex-col gap-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-4 h-4 text-cyan-400">
+              <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" />
+              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+            </svg>
+            <span className="font-mono text-xs font-bold text-cyan-400 tracking-widest">AI SETTINGS</span>
+          </div>
+          <button onClick={onClose} className="text-slate-600 hover:text-slate-300 transition-colors">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-4 h-4">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {/* AI Frame Skip Slider */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-mono text-[10px] text-slate-400 tracking-widest uppercase">AI Frame Skip</span>
+            <span className="font-mono text-lg font-bold text-cyan-400">N = {aiFrameSkip}</span>
+          </div>
+          <input
+            type="range" min={1} max={30} step={1} value={aiFrameSkip}
+            onChange={(e) => setAiFrameSkip(parseInt(e.target.value))}
+            className="w-full h-1.5 appearance-none rounded-full bg-slate-800 outline-none cursor-pointer
+              [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4
+              [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-cyan-400
+              [&::-webkit-slider-thumb]:shadow-[0_0_8px_rgba(34,211,238,0.7)] [&::-webkit-slider-thumb]:cursor-pointer"
+          />
+          <div className="flex justify-between mt-1">
+            <span className="font-mono text-[9px] text-slate-600">N=1 (ทุก frame)</span>
+            <span className="font-mono text-[9px] text-slate-600">N=30</span>
+          </div>
+        </div>
+
+        {/* Info */}
+        <div className="border border-slate-800 bg-slate-900/40 rounded-sm p-3 flex justify-between">
+          <div className="text-center">
+            <p className="font-mono text-[9px] text-slate-600 mb-1">ประมวลผลจริง</p>
+            <p className="font-mono text-sm font-bold text-cyan-400">~{estFps} fps</p>
+          </div>
+          <div className="text-center">
+            <p className="font-mono text-[9px] text-slate-600 mb-1">Skip ต่อรอบ</p>
+            <p className="font-mono text-sm font-bold text-slate-300">{aiFrameSkip - 1} frame</p>
+          </div>
+          <div className="text-center">
+            <p className="font-mono text-[9px] text-slate-600 mb-1">GPU load</p>
+            <p className={`font-mono text-sm font-bold ${aiFrameSkip <= 3 ? "text-red-400" : aiFrameSkip <= 7 ? "text-amber-400" : "text-green-400"}`}>
+              {aiFrameSkip <= 3 ? "HIGH" : aiFrameSkip <= 7 ? "MED" : "LOW"}
+            </p>
+          </div>
+        </div>
+
+        <p className="font-mono text-[9px] text-slate-600 leading-relaxed">
+          มีผลเมื่อกด START NEW ครั้งถัดไป — stream ที่กำลังรันอยู่ไม่ได้รับผลกระทบ
+        </p>
+
+        {/* Actions */}
+        <div className="flex items-center gap-2">
+          {msg && <span className={`font-mono text-xs flex-1 ${msg.startsWith("✓") ? "text-green-400" : "text-red-400"}`}>{msg}</span>}
+          <button onClick={onClose} className="flex-1 font-mono text-xs px-3 py-2 border border-slate-700 text-slate-400 hover:text-slate-200 rounded-sm transition-all">
+            CANCEL
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="flex-1 font-mono text-xs font-bold px-3 py-2 border border-cyan-600/60 bg-cyan-950/30 text-cyan-400 hover:bg-cyan-900/40 rounded-sm transition-all disabled:opacity-50"
+          >
+            {saving ? "SAVING…" : "SAVE"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }

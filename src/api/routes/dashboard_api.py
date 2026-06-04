@@ -365,32 +365,121 @@ async def _mjpeg_generator(source: str, camera_id: str) -> AsyncGenerator[bytes,
         return  # Exit when AI processing stops
                 
     # Inactive camera: relay raw stream without AI processing.
+    from src.config_loader import get_stream_config
     import cv2
+
+    # For HTTP/HTTPS sources, try direct byte-relay first (avoids OpenCV decode→encode overhead
+    # and handles MJPEG streams that OpenCV on Windows cannot open via HTTP).
+    if source.startswith("http://") or source.startswith("https://"):
+        try:
+            import httpx
+            print(f"[MJPEG] Trying HTTP direct relay for camera {camera_id}: {source}")
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                async with client.stream("GET", source, headers={"Connection": "keep-alive"}) as resp:
+                    content_type = resp.headers.get("content-type", "")
+                    print(f"[MJPEG] HTTP relay connected for camera {camera_id}, content-type: {content_type}")
+                    if "multipart" in content_type:
+                        # Already MJPEG multipart — pipe bytes through directly
+                        print(f"[MJPEG] Piping multipart MJPEG directly for camera {camera_id}")
+                        async for chunk in resp.aiter_bytes(chunk_size=65536):
+                            yield chunk
+                        return
+                    elif "image/jpeg" in content_type or "image/jpg" in content_type:
+                        # Single JPEG snapshot — wrap in MJPEG boundary and loop
+                        print(f"[MJPEG] Wrapping single JPEG as MJPEG for camera {camera_id}")
+                        data = await resp.aread()
+                        while True:
+                            yield (
+                                b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+                                + data
+                                + b"\r\n"
+                            )
+                            await asyncio.sleep(1 / 15)
+                            # Refresh snapshot
+                            try:
+                                snap = await client.get(source)
+                                data = snap.content
+                            except Exception:
+                                break
+                        return
+                    else:
+                        # Unknown content type — fall through to OpenCV
+                        print(f"[MJPEG] Unknown HTTP content-type '{content_type}' for camera {camera_id}, falling back to OpenCV")
+        except Exception as e:
+            print(f"[MJPEG] HTTP relay failed for camera {camera_id}: {e}, falling back to OpenCV")
+
+    scfg = get_stream_config()
+    mode = scfg.get("frame_skip_mode", "auto")
+    skip_n = max(1, int(scfg.get("frame_skip_n", 2)))
+    target_fps = max(1, int(scfg.get("target_fps", 15)))
+    buf_size = max(1, int(scfg.get("buffer_size", 1)))
+
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
         print(f"[MJPEG] Cannot open raw source for camera {camera_id}: {source}")
         return
-    print(f"[MJPEG] Raw relay started for camera {camera_id}")
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, buf_size)
+    print(f"[MJPEG] Raw relay started for camera {camera_id} | mode={mode} skip_n={skip_n} target_fps={target_fps} buf={buf_size}")
+
+    frame_interval = 1.0 / target_fps
+    frame_count = 0
+    last_send_time = 0.0
+
+    def _read_latest_frame():
+        """Flush buffer with grab() then decode only the newest frame."""
+        grabbed = 0
+        while True:
+            ok = cap.grab()
+            if not ok:
+                break
+            grabbed += 1
+            # stop grabbing once buffer is empty (grab returns immediately when empty)
+            # we do at most buf_size+2 extra grabs to drain stale frames
+            if grabbed > buf_size + 2:
+                break
+        return cap.retrieve()
+
     try:
         while True:
-            ok, frame = await loop.run_in_executor(None, cap.read)
-            if not ok:
+            if mode == "none":
+                ok, frame = await loop.run_in_executor(None, cap.read)
+            elif mode == "fixed":
+                # grab (skip) skip_n-1 frames, decode only the last
+                def _read_fixed():
+                    for _ in range(skip_n - 1):
+                        cap.grab()
+                    return cap.read()
+                ok, frame = await loop.run_in_executor(None, _read_fixed)
+            else:  # auto — drain buffer, get freshest frame
+                ok, frame = await loop.run_in_executor(None, _read_latest_frame)
+
+            if not ok or frame is None:
                 await asyncio.sleep(0.05)
                 continue
-            ok_enc, jpeg = cv2.imencode(".jpg", frame)
+
+            ok_enc, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if not ok_enc:
                 await asyncio.sleep(0.01)
                 continue
+
+            frame_count += 1
             yield (
                 b"--frame\r\n"
                 b"Content-Type: image/jpeg\r\n\r\n"
                 + jpeg.tobytes()
                 + b"\r\n"
             )
-            await asyncio.sleep(1 / 15)
+
+            # rate-limit to target_fps
+            now = time.perf_counter()
+            elapsed = now - last_send_time
+            sleep_time = frame_interval - elapsed
+            last_send_time = now
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
     finally:
         cap.release()
-        print(f"[MJPEG] Raw relay stopped for camera {camera_id}")
+        print(f"[MJPEG] Raw relay stopped for camera {camera_id} total_frames={frame_count}")
 
 
 
@@ -427,25 +516,115 @@ async def mjpeg_stream(camera_id: str):
 
 @router.post("/prediction/{camera_id}/stop")
 async def stop_prediction(camera_id: str):
-    """Stop AI processing for a camera entirely and return to inactive state."""
+    """Stop AI processing for a camera. _run_and_finalize will unregister + finalize job."""
     event = _ACTIVE_STREAMS.get(camera_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Camera is not currently processing")
-    
-    # 1. Trigger the stop event to stop the stream processor loop.
+
     event.set()
-    
-    # 2. Wait a moment for it to gracefully exit
     await asyncio.sleep(0.5)
-    
-    # 3. Clean up stream manager memory cache so old frames don't reappear later
     stream_manager.clear_camera(camera_id)
-    
     return {"status": "success", "camera_id": camera_id, "message": "Prediction stopped"}
+
+def _live_job_result_path(job_id: str) -> "Path":
+    from pathlib import Path
+    from src.config_loader import get_json_storage_root
+    return Path(get_json_storage_root()).resolve() / job_id / "prediction_results.json"
+
+
+def _init_live_job(job_id: str, camera_id: str, source: str) -> "Path":
+    """Create job directory + initial prediction_results.json + register in index."""
+    import datetime
+    from pathlib import Path
+    from src.config_loader import get_json_storage_root
+
+    json_root = Path(get_json_storage_root()).resolve()
+    job_dir = json_root / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    result_path = job_dir / "prediction_results.json"
+
+    result_data = {
+        "metadata": {
+            "source_video": source,
+            "camera_id": camera_id,
+            "fps": 0, "width": 0, "height": 0,
+            "job_id": job_id,
+            "stream_id": job_id,
+            "status": "processing",
+            "started_at": datetime.datetime.now().isoformat(),
+        },
+        "frames": [],
+    }
+    result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Register in index.json
+    index_path = json_root / "json_jobs" / "index.json"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        idx = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {"jobs": []}
+        if not isinstance(idx.get("jobs"), list):
+            idx["jobs"] = []
+        idx["jobs"].append({
+            "id": job_id,
+            "label": f"[LIVE] {camera_id}",
+            "source": source,
+            "status": "processing",
+            "output_dir": job_id,
+            "path": str(job_dir),
+            "metadata": {"camera_id": camera_id},
+        })
+        tmp = index_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(index_path)
+    except Exception as e:
+        print(f"[LiveJob] Failed to register in index: {e}")
+
+    return result_path
+
+
+def _append_frame_result(result_path: "Path", frame_number: int, persons: list) -> None:
+    """Append one frame's detections to prediction_results.json (thread-safe via tmp swap)."""
+    try:
+        data = json.loads(result_path.read_text(encoding="utf-8"))
+        data["frames"].append({"frame": frame_number, "time": round(frame_number / 30, 3), "persons": persons})
+        tmp = result_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(result_path)
+    except Exception as e:
+        print(f"[LiveJob] Failed to append frame {frame_number}: {e}")
+
+
+def _finalize_live_job(job_id: str) -> None:
+    """Mark job as completed in prediction_results.json and index."""
+    from pathlib import Path
+    from src.config_loader import get_json_storage_root
+
+    json_root = Path(get_json_storage_root()).resolve()
+    result_path = json_root / job_id / "prediction_results.json"
+    try:
+        data = json.loads(result_path.read_text(encoding="utf-8"))
+        data["metadata"]["status"] = "completed"
+        result_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    index_path = json_root / "json_jobs" / "index.json"
+    try:
+        idx = json.loads(index_path.read_text(encoding="utf-8"))
+        for job in idx.get("jobs", []):
+            if job.get("id") == job_id:
+                job["status"] = "completed"
+                break
+        tmp = index_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(index_path)
+    except Exception:
+        pass
+
 
 @router.post("/prediction/{camera_id}/start")
 async def start_prediction(camera_id: str, background_tasks: BackgroundTasks, resume: bool = False):
-    """Manually start AI processing for a camera that is currently inactive."""
+    """Start AI processing for a live camera — same pipeline as processing page, saves to JSON."""
     if camera_id in _ACTIVE_STREAMS:
         raise HTTPException(status_code=400, detail="Camera is already processing")
 
@@ -453,49 +632,59 @@ async def start_prediction(camera_id: str, background_tasks: BackgroundTasks, re
     if not source:
         raise HTTPException(status_code=404, detail="Camera has no source URL")
 
-    # Use StreamProcessor singleton to avoid duplicate processing
-    from services.stream_processor import get_stream_processor
-    import time
-    
+    from src.config_loader import get_stream_config, get_storage_mode
+    import uuid
+
+    scfg = get_stream_config()
+    ai_frame_skip = max(1, int(scfg.get("ai_frame_skip", 5)))
+
     stop_event = _register_stream(camera_id)
-    
-    # Define callbacks
-    def on_detection(camera_id: str, detections: list, frame_number: int, frame_bytes: bytes):
-        """Handle detection results"""
+
+    # Create JSON job for result storage
+    job_id = f"live_{camera_id}_{uuid.uuid4().hex[:8]}"
+    result_path = None
+    if get_storage_mode() == "json":
+        result_path = _init_live_job(job_id, camera_id, source)
+        print(f"[LiveJob] Created job {job_id} for camera {camera_id}")
+
+    def on_detection(cam_id: str, detections: list, frame_number: int, frame_bytes: bytes):
         try:
-            print(f"[DEBUG] on_detection called for camera {camera_id}, frame #{frame_number}, detections: {len(detections)}")
-            # Store in global cache for MJPEG streaming
-            stream_manager.update_frame(camera_id, frame_bytes, frame_number)
-            stream_manager.update_detections(camera_id, detections)
-            
-            # Log detection summary
-            person_count = sum(1 for d in detections if d.get('class_name') == 'person')
-            if person_count > 0:
-                timestamp = time.strftime("%H:%M:%S", time.localtime())
-                print(f"[{timestamp}] {person_count} person(s) detected in frame #{frame_number}")
-                
+            stream_manager.update_frame(cam_id, frame_bytes, frame_number)
+            stream_manager.update_detections(cam_id, detections)
+            if result_path and detections:
+                _append_frame_result(result_path, frame_number, detections)
         except Exception as e:
-            print(f"Detection callback error: {e}")
-    
+            print(f"[LiveJob] Detection callback error: {e}")
+
     def on_frame(frame, frame_number):
-        """Handle each frame"""
         pass
-    
-    # Start stream using StreamProcessor singleton
-    processor_instance = await get_stream_processor()
-    processor = await processor_instance.start_stream(
-        camera_id=camera_id,
-        source=source,
-        on_detection=on_detection,
-        on_frame=on_frame,
-        stop_event=stop_event,
-        frame_skip=5,
-    )
-    
+
+    async def _run_and_finalize():
+        from services.stream_processor import get_stream_processor
+        try:
+            processor_instance = await get_stream_processor()
+            await processor_instance.start_stream(
+                camera_id=camera_id,
+                source=source,
+                on_detection=on_detection,
+                on_frame=on_frame,
+                stop_event=stop_event,
+                frame_skip=ai_frame_skip,
+            )
+        finally:
+            if result_path:
+                _finalize_live_job(job_id)
+                print(f"[LiveJob] Finalized job {job_id}")
+            _unregister_stream(camera_id)
+
+    background_tasks.add_task(_run_and_finalize)
+
     return {
         "status": "success",
         "camera_id": camera_id,
-        "message": "Prediction started using StreamProcessor"
+        "job_id": job_id,
+        "ai_frame_skip": ai_frame_skip,
+        "message": f"Prediction started (frame_skip={ai_frame_skip}, saving={'json' if result_path else 'off'})",
     }
 
 # ─── Live Data API (Optional) ─────────────────────────────────────────────────
