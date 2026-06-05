@@ -178,6 +178,76 @@ async def json_storage_stats():
     return JsonInvestigationService().stats()
 
 
+@router.get("/cameras")
+async def list_cameras_from_jobs():
+    """List unique camera_ids that have job data, with stream/non-stream counts."""
+    svc = JsonInvestigationService()
+    index = svc._load_index()
+    cameras: dict[str, dict] = {}
+    for job in index.get("jobs", []):
+        cam = str(job.get("metadata", {}).get("camera_id") or job.get("id", ""))
+        if not cam:
+            continue
+        is_stream = str(job.get("id", "")).startswith("live_")
+        if cam not in cameras:
+            cameras[cam] = {"camera_id": cam, "stream_jobs": 0, "video_jobs": 0, "total_jobs": 0}
+        cameras[cam]["total_jobs"] += 1
+        if is_stream:
+            cameras[cam]["stream_jobs"] += 1
+        else:
+            cameras[cam]["video_jobs"] += 1
+    return {"cameras": list(cameras.values())}
+
+
+@router.delete("/camera/{camera_id}")
+async def delete_camera_data(
+    camera_id: str,
+    data_type: str = Query("all", description="all | stream | non_stream"),
+):
+    """Delete all job data for a camera. data_type: all | stream | non_stream."""
+    import shutil
+    svc = JsonInvestigationService()
+    index = svc._load_index()
+    json_root = svc.root
+
+    deleted_jobs: list[str] = []
+    kept_jobs: list[dict] = []
+
+    for job in index.get("jobs", []):
+        job_cam = str(job.get("metadata", {}).get("camera_id") or "")
+        if job_cam != camera_id:
+            kept_jobs.append(job)
+            continue
+
+        is_stream = str(job.get("id", "")).startswith("live_")
+        should_delete = (
+            data_type == "all"
+            or (data_type == "stream" and is_stream)
+            or (data_type == "non_stream" and not is_stream)
+        )
+        if not should_delete:
+            kept_jobs.append(job)
+            continue
+
+        # Delete job directory
+        job_dir = json_root / str(job.get("output_dir") or job.get("id", ""))
+        if job_dir.exists() and svc._is_deletable_json_result_dir(job_dir):
+            shutil.rmtree(job_dir, ignore_errors=True)
+        deleted_jobs.append(job.get("id", ""))
+
+    # Update index
+    index["jobs"] = kept_jobs
+    svc._write_json(svc.index_path, index)
+
+    return {
+        "status": "deleted",
+        "camera_id": camera_id,
+        "data_type": data_type,
+        "deleted_count": len(deleted_jobs),
+        "deleted_jobs": deleted_jobs,
+    }
+
+
 @router.delete("/clear")
 async def clear_json_storage(include_orphan_results: bool = Query(False)):
     return JsonInvestigationService().clear(include_orphan_results=include_orphan_results)

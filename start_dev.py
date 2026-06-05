@@ -30,7 +30,7 @@ def run_backend():
     print(f"{Colors.CYAN}Docs: http://localhost:8000/docs\n{Colors.END}")
     
     return subprocess.Popen(
-        ["python", "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"],
+        ["python", "-m", "uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--timeout-graceful-shutdown", "3"],
         cwd=os.path.dirname(__file__),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

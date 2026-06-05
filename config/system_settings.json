@@ -45,6 +45,6 @@
     "frame_skip_n": 2,
     "target_fps": 15,
     "buffer_size": 1,
-    "ai_frame_skip": 5
+    "ai_frame_skip": 2
   }
 }

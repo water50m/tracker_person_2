@@ -10,12 +10,13 @@ from __future__ import annotations
 import os
 import asyncio
 import sys
+import threading
 import time
 import json
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
-from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -29,24 +30,6 @@ from src.api.video_controller import (
 
 # Add src to path for refactored services
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
-# Refactored StreamProcessor (lazy import)
-_stream_manager: Optional['StreamManager'] = None
-
-async def _get_stream_manager():
-    """Lazy initialization of StreamManager"""
-    global _stream_manager
-    
-    if _stream_manager is None:
-        from services.stream_processor import StreamManager
-        from services.thread_pool_processor import ThreadPoolProcessor
-        
-        pool = ThreadPoolProcessor(max_workers=4)
-        await pool.initialize()
-        
-        _stream_manager = StreamManager(pool)
-    
-    return _stream_manager
 
 
 async def _process_stream_refactored(
@@ -203,6 +186,34 @@ async def list_dashboard_cameras():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ─── Camera health (TCP reachability) ─────────────────────────────────────────
+
+@router.get("/camera-health")
+async def camera_health_all():
+    """Return latest reachability status for all cameras (red/green dots)."""
+    from src.services import camera_health
+    return {"health": camera_health.get_all_status()}
+
+
+@router.get("/camera-health/{camera_id}")
+async def camera_health_one(camera_id: str):
+    """Return latest reachability status for one camera."""
+    from src.services import camera_health
+    status = camera_health.get_status(camera_id)
+    return {"camera_id": camera_id, "status": status}
+
+
+@router.post("/camera-health/{camera_id}/recheck")
+async def camera_health_recheck(camera_id: str):
+    """Force an immediate reachability recheck (reconnect button)."""
+    from src.services import camera_health
+    url = _get_rtsp_url(camera_id)
+    if not url:
+        raise HTTPException(status_code=404, detail="Camera not found or has no source URL")
+    status = await camera_health.check_camera(camera_id, url)
+    return {"camera_id": camera_id, "status": status}
+
+
 # ─── Latest detections ────────────────────────────────────────────────────────
 
 @router.get("/latest-detections/{camera_id}")
@@ -273,96 +284,54 @@ def _get_rtsp_url(camera_id: str) -> str | None:
     return None
 
 
-async def _mjpeg_generator(source: str, camera_id: str) -> AsyncGenerator[bytes, None]:
+async def _mjpeg_generator(source: str, camera_id: str, request: Request) -> AsyncGenerator[bytes, None]:
     """Open a video source with OpenCV and yield MJPEG boundary frames."""
     loop = asyncio.get_event_loop()
 
-    # If AI processing is active for this camera, stream from the global cache
-    print(f"[DEBUG] Camera {camera_id} in _ACTIVE_STREAMS: {camera_id in _ACTIVE_STREAMS}")
-    print(f"[DEBUG] Active streams: {list(_ACTIVE_STREAMS.keys())}")
+    # If AI processing is active, stream annotated frames directly from the pipeline queue.
+    # No polling — frames arrive the instant the pipeline encodes them.
     if camera_id in _ACTIVE_STREAMS:
-        print(f"[MJPEG] Starting stream for camera {camera_id}, AI processing active")
+        q = _FRAME_QUEUES.get(camera_id)
+        if q is None:
+            # Pipeline queue not yet registered (race at startup) — wait briefly
+            for _ in range(20):
+                await asyncio.sleep(0.1)
+                q = _FRAME_QUEUES.get(camera_id)
+                if q is not None:
+                    break
+
+        print(f"[MJPEG] AI queue stream started for camera {camera_id}")
         frame_count = 0
-        start_time = time.time()
-        last_log_time = time.time()
-        while camera_id in _ACTIVE_STREAMS:
-            try:
-                frame_bytes = stream_manager.get_frame(camera_id)
-                if frame_bytes:
+        last_frame_time = time.time()
+        _viewer_connect(camera_id)  # resume AI if it was paused
+        try:
+            while camera_id in _ACTIVE_STREAMS:
+                if await request.is_disconnected():
+                    print(f"[MJPEG] Client disconnected — camera {camera_id}")
+                    return
+                if q is None:
+                    await asyncio.sleep(0.05)
+                    continue
+                try:
+                    jpeg = await asyncio.wait_for(q.get(), timeout=2.0)
+                    last_frame_time = time.time()
                     frame_count += 1
-                    current_time = time.time()
-                    # Get frame number from stream manager
-                    frame_number = stream_manager.latest_frame_numbers.get(camera_id, frame_count)
-                    
-                    # Skip duplicate frames to avoid sending the same frame multiple times
-                    if not hasattr(stream_manager, '_last_sent_frame'):
-                        stream_manager._last_sent_frame = {}
-                    
-                    last_frame = stream_manager._last_sent_frame.get(camera_id)
-                    if frame_number == last_frame:
-                        # Skip duplicate frame - log occasionally
-                        if frame_count % 30 == 0:
-                            print(f"[MJPEG] Skipping duplicate frame #{frame_number} for camera {camera_id}")
-                        await asyncio.sleep(1 / 15)  # 15 FPS
-                        continue
-                    
-                    # Update last sent frame
-                    stream_manager._last_sent_frame[camera_id] = frame_number
-                    
-                    # Debug: Log when new frame is sent
-                    if frame_count % 10 == 0:
-                        print(f"[MJPEG] Sending NEW frame #{frame_number} for camera {camera_id} (previous: {last_frame})")
-                    
-                    # Transmission timing
-                    trans_start = time.perf_counter()
                     yield (
                         b"--frame\r\n"
                         b"Content-Type: image/jpeg\r\n\r\n"
-                        + frame_bytes
+                        + jpeg
                         + b"\r\n"
                     )
-                    trans_time = (time.perf_counter() - trans_start) * 1000
-                    
-                    # Log every frame that gets sent
-                    timestamp = time.strftime("%H:%M:%S", time.localtime())
-                    print(f"[{timestamp}] Frame #{frame_number} sent to frontend, transmission time: {trans_time:.2f}ms, size: {len(frame_bytes)} bytes, FPS: ~{frame_count/(time.time()-start_time+0.1):.1f}")
-                else:
-                    # No frame available yet
-                    if frame_count == 0:  # Log only once at start
-                        print(f"[MJPEG] Waiting for first frame for camera {camera_id}...")
-                        start_time = time.time()
-                    
-                    # Check if AI processing is still active
-                    if camera_id not in _ACTIVE_STREAMS:
-                        print(f"[MJPEG] Camera {camera_id} no longer in active streams, stopping generator")
-                        return
-                    
-                    # If no new frames for 10 seconds, stop the stream
-                    no_frame_time = time.time() - current_time if 'current_time' in locals() else 0
-                    if no_frame_time > 10:
-                        print(f"[MJPEG] No new frames for {no_frame_time:.1f}s, stopping stream (AI processing likely stopped)")
-                        return
-                    
-                    # Log warning after 5 seconds
-                    if no_frame_time > 5:
-                        print(f"[MJPEG] No new frames for {no_frame_time:.1f}s, AI processing may have stopped")
-                    
-                    await asyncio.sleep(1 / 30)  # Shorter sleep when waiting for frames
-                    continue
-                await asyncio.sleep(1 / 15)  # 15 FPS for better performance
-            except Exception as e:
-                print(f"[MJPEG] ❌ Error in MJPEG generator for camera {camera_id}: {e}")
-                # Send error frame to frontend
-                error_frame = b"ERROR: Stream interrupted"
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: text/plain\r\n\r\n"
-                    + error_frame
-                    + b"\r\n"
-                )
-                return
-        print(f"[MJPEG] Stream ended for camera {camera_id}, total frames: {frame_count}")
-        return  # Exit when AI processing stops
+                except asyncio.TimeoutError:
+                    # No frames — likely paused (no other viewers) or stalled.
+                    # Don't force-stop on pause; keep the connection alive.
+                    pass
+        except asyncio.CancelledError:
+            pass
+        finally:
+            _viewer_disconnect(camera_id)
+        print(f"[MJPEG] AI queue stream ended — camera {camera_id}, frames sent: {frame_count}")
+        return
                 
     # Inactive camera: relay raw stream without AI processing.
     from src.config_loader import get_stream_config
@@ -373,22 +342,21 @@ async def _mjpeg_generator(source: str, camera_id: str) -> AsyncGenerator[bytes,
     if source.startswith("http://") or source.startswith("https://"):
         try:
             import httpx
-            print(f"[MJPEG] Trying HTTP direct relay for camera {camera_id}: {source}")
+            print(f"[MJPEG] HTTP relay starting — camera {camera_id}")
             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                 async with client.stream("GET", source, headers={"Connection": "keep-alive"}) as resp:
                     content_type = resp.headers.get("content-type", "")
-                    print(f"[MJPEG] HTTP relay connected for camera {camera_id}, content-type: {content_type}")
                     if "multipart" in content_type:
-                        # Already MJPEG multipart — pipe bytes through directly
-                        print(f"[MJPEG] Piping multipart MJPEG directly for camera {camera_id}")
                         async for chunk in resp.aiter_bytes(chunk_size=65536):
                             yield chunk
                         return
                     elif "image/jpeg" in content_type or "image/jpg" in content_type:
-                        # Single JPEG snapshot — wrap in MJPEG boundary and loop
-                        print(f"[MJPEG] Wrapping single JPEG as MJPEG for camera {camera_id}")
+                        print(f"[MJPEG] Single JPEG mode — camera {camera_id}")
                         data = await resp.aread()
                         while True:
+                            if await request.is_disconnected():
+                                print(f"[MJPEG] Client disconnected — camera {camera_id}")
+                                return
                             yield (
                                 b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
                                 + data
@@ -414,11 +382,30 @@ async def _mjpeg_generator(source: str, camera_id: str) -> AsyncGenerator[bytes,
     target_fps = max(1, int(scfg.get("target_fps", 15)))
     buf_size = max(1, int(scfg.get("buffer_size", 1)))
 
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
+    # Open the capture in a thread with a short open timeout. VideoCapture() blocks on
+    # TCP connect; for an unreachable camera the default ~75s stall would hold an executor
+    # thread that long, and enough dead cameras starve the pool — freezing live pipelines
+    # (YOLO/cap.read) that share it. A fast-fail open timeout prevents that.
+    def _open_capture():
+        open_ms = getattr(cv2, "CAP_PROP_OPEN_TIMEOUT_MSEC", None)
+        read_ms = getattr(cv2, "CAP_PROP_READ_TIMEOUT_MSEC", None)
+        if open_ms is not None and read_ms is not None:
+            try:
+                return cv2.VideoCapture(source, cv2.CAP_FFMPEG, [
+                    int(open_ms), 5000,
+                    int(read_ms), 5000,
+                ])
+            except Exception:
+                pass
+        return cv2.VideoCapture(source)
+
+    cap = await loop.run_in_executor(None, _open_capture)
+    if not await loop.run_in_executor(None, cap.isOpened):
         print(f"[MJPEG] Cannot open raw source for camera {camera_id}: {source}")
+        await loop.run_in_executor(None, cap.release)
         return
     cap.set(cv2.CAP_PROP_BUFFERSIZE, buf_size)
+    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 2000)
     print(f"[MJPEG] Raw relay started for camera {camera_id} | mode={mode} skip_n={skip_n} target_fps={target_fps} buf={buf_size}")
 
     frame_interval = 1.0 / target_fps
@@ -439,12 +426,55 @@ async def _mjpeg_generator(source: str, camera_id: str) -> AsyncGenerator[bytes,
                 break
         return cap.retrieve()
 
+    last_ai_frame_number = None
+    cap_released = False
+    counted_as_viewer = False
+
     try:
         while True:
+            if await request.is_disconnected():
+                print(f"[MJPEG] Client disconnected — camera {camera_id}")
+                return
+
+            # If AI prediction started after we entered the raw relay branch,
+            # switch to annotated frames from the pipeline queue.
+            if camera_id in _ACTIVE_STREAMS:
+                ai_q = _FRAME_QUEUES.get(camera_id)
+                if ai_q is not None:
+                    # Close raw cap on first switch — two readers on the same
+                    # MJPEG source compete for data and cause jitter.
+                    if not cap_released:
+                        cap.release()
+                        cap_released = True
+                        print(f"[MJPEG] Switched to AI queue, raw cap released — camera {camera_id}")
+                    if not counted_as_viewer:
+                        _viewer_connect(camera_id)  # resume AI if paused
+                        counted_as_viewer = True
+                    try:
+                        ai_frame = await asyncio.wait_for(ai_q.get(), timeout=2.0)
+                        if ai_frame:  # skip empty shutdown sentinel
+                            frame_count += 1
+                            yield (
+                                b"--frame\r\n"
+                                b"Content-Type: image/jpeg\r\n\r\n"
+                                + ai_frame
+                                + b"\r\n"
+                            )
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+                # AI active but queue not registered yet — fall through to raw frame
+
+            # AI stream ended (camera no longer active). If we already released the
+            # raw cap when switching to AI frames, end this connection cleanly so the
+            # browser reconnects for raw video — otherwise we'd busy-loop on a dead cap.
+            if cap_released:
+                print(f"[MJPEG] AI ended, raw cap was released — ending stream for {camera_id}")
+                return
+
             if mode == "none":
                 ok, frame = await loop.run_in_executor(None, cap.read)
             elif mode == "fixed":
-                # grab (skip) skip_n-1 frames, decode only the last
                 def _read_fixed():
                     for _ in range(skip_n - 1):
                         cap.grab()
@@ -478,26 +508,25 @@ async def _mjpeg_generator(source: str, camera_id: str) -> AsyncGenerator[bytes,
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
     finally:
-        cap.release()
+        if counted_as_viewer:
+            _viewer_disconnect(camera_id)
+        if not cap_released:
+            cap.release()
         print(f"[MJPEG] Raw relay stopped for camera {camera_id} total_frames={frame_count}")
 
 
 
 @router.get("/mjpeg/{camera_id}")
-async def mjpeg_stream(camera_id: str):
+async def mjpeg_stream(camera_id: str, request: Request):
     """
     Stream live MJPEG from the camera's source_url or from the global shared buffer if AI is processing.
     Browser just needs: <img src="/api/dashboard/mjpeg/{camera_id}">
     """
-    print(f"[MJPEG] Request received for camera {camera_id}")
-    
     source = _get_rtsp_url(camera_id)
     if source is None:
         raise HTTPException(status_code=404, detail=f"Camera '{camera_id}' not found or has no source URL")
-
-    print(f"[MJPEG] Starting streaming response for camera {camera_id}")
     return StreamingResponse(
-        _mjpeg_generator(source, camera_id),
+        _mjpeg_generator(source, camera_id, request),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
@@ -516,13 +545,25 @@ async def mjpeg_stream(camera_id: str):
 
 @router.post("/prediction/{camera_id}/stop")
 async def stop_prediction(camera_id: str):
-    """Stop AI processing for a camera. _run_and_finalize will unregister + finalize job."""
+    """Stop AI processing and wait for the pipeline to fully finish before returning,
+    so the camera is immediately restartable (no 409 race)."""
     event = _ACTIVE_STREAMS.get(camera_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Camera is not currently processing")
 
     event.set()
-    await asyncio.sleep(0.5)
+
+    # Wait for the pipeline's finally block to complete (cap.release, unregister, etc.).
+    # Bounded so a hung pipeline can't block the request forever.
+    done = _STREAM_DONE.get(camera_id)
+    if done is not None:
+        try:
+            await asyncio.wait_for(done.wait(), timeout=6.0)
+        except asyncio.TimeoutError:
+            print(f"[LiveJob] stop: timed out waiting for pipeline cleanup — camera {camera_id}")
+        finally:
+            _STREAM_DONE.pop(camera_id, None)
+
     stream_manager.clear_camera(camera_id)
     return {"status": "success", "camera_id": camera_id, "message": "Prediction stopped"}
 
@@ -582,14 +623,17 @@ def _init_live_job(job_id: str, camera_id: str, source: str) -> "Path":
     return result_path
 
 
+_append_lock = threading.Lock()
+
 def _append_frame_result(result_path: "Path", frame_number: int, persons: list) -> None:
-    """Append one frame's detections to prediction_results.json (thread-safe via tmp swap)."""
+    """Append one frame's detections to prediction_results.json (thread-safe)."""
     try:
-        data = json.loads(result_path.read_text(encoding="utf-8"))
-        data["frames"].append({"frame": frame_number, "time": round(frame_number / 30, 3), "persons": persons})
-        tmp = result_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(result_path)
+        with _append_lock:
+            data = json.loads(result_path.read_text(encoding="utf-8"))
+            data["frames"].append({"frame": frame_number, "time": round(frame_number / 30, 3), "persons": persons})
+            tmp = result_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(result_path)
     except Exception as e:
         print(f"[LiveJob] Failed to append frame {frame_number}: {e}")
 
@@ -622,9 +666,68 @@ def _finalize_live_job(job_id: str) -> None:
         pass
 
 
+# Per-camera asyncio.Queue for annotated JPEG frames.
+# LiveStreamPipeline pushes here; MJPEG relay awaits here — no poll delay.
+_FRAME_QUEUES: dict[str, asyncio.Queue] = {}
+
+# Per-camera event set when the pipeline's finally block fully completes.
+# stop_prediction awaits this so the camera is restartable immediately on return.
+_STREAM_DONE: dict[str, asyncio.Event] = {}
+
+# ── Viewer tracking for auto-pause ────────────────────────────────────────────
+# When the MJPEG viewer count for a camera drops to 0 (F5 / closed tab), the
+# pipeline pauses YOLO after a short grace period (handles quick F5 reconnects).
+# active_event SET = viewers present = run AI;  CLEARED = paused.
+_VIEWER_COUNTS: dict[str, int] = {}
+_VIEWER_EVENTS: dict[str, asyncio.Event] = {}
+_PAUSE_TASKS: dict[str, asyncio.Task] = {}
+_PAUSE_GRACE_SEC = 3.0
+
+
+def _viewer_connect(camera_id: str) -> None:
+    """A viewer (MJPEG relay) connected — resume AI immediately."""
+    _VIEWER_COUNTS[camera_id] = _VIEWER_COUNTS.get(camera_id, 0) + 1
+    # Cancel any pending pause
+    t = _PAUSE_TASKS.pop(camera_id, None)
+    if t and not t.done():
+        t.cancel()
+    ev = _VIEWER_EVENTS.get(camera_id)
+    if ev is not None and not ev.is_set():
+        ev.set()
+
+
+def _viewer_disconnect(camera_id: str) -> None:
+    """A viewer disconnected — if none left, schedule a grace-delayed pause."""
+    n = _VIEWER_COUNTS.get(camera_id, 0) - 1
+    if n > 0:
+        _VIEWER_COUNTS[camera_id] = n
+        return
+    _VIEWER_COUNTS.pop(camera_id, None)
+
+    ev = _VIEWER_EVENTS.get(camera_id)
+    if ev is None:
+        return
+
+    async def _grace_pause():
+        try:
+            await asyncio.sleep(_PAUSE_GRACE_SEC)
+            if _VIEWER_COUNTS.get(camera_id, 0) <= 0:
+                ev.clear()  # pause the pipeline
+                print(f"[Viewer] No viewers for {_PAUSE_GRACE_SEC}s — pausing AI for {camera_id}")
+        except asyncio.CancelledError:
+            pass
+        finally:
+            _PAUSE_TASKS.pop(camera_id, None)
+
+    t = _PAUSE_TASKS.pop(camera_id, None)
+    if t and not t.done():
+        t.cancel()
+    _PAUSE_TASKS[camera_id] = asyncio.create_task(_grace_pause())
+
+
 @router.post("/prediction/{camera_id}/start")
-async def start_prediction(camera_id: str, background_tasks: BackgroundTasks, resume: bool = False):
-    """Start AI processing for a live camera — same pipeline as processing page, saves to JSON."""
+async def start_prediction(camera_id: str, background_tasks: BackgroundTasks):
+    """Start AI processing for a live camera using the full stream-analyze pipeline."""
     if camera_id in _ACTIVE_STREAMS:
         raise HTTPException(status_code=400, detail="Camera is already processing")
 
@@ -640,42 +743,66 @@ async def start_prediction(camera_id: str, background_tasks: BackgroundTasks, re
 
     stop_event = _register_stream(camera_id)
 
-    # Create JSON job for result storage
     job_id = f"live_{camera_id}_{uuid.uuid4().hex[:8]}"
     result_path = None
     if get_storage_mode() == "json":
         result_path = _init_live_job(job_id, camera_id, source)
         print(f"[LiveJob] Created job {job_id} for camera {camera_id}")
 
-    def on_detection(cam_id: str, detections: list, frame_number: int, frame_bytes: bytes):
-        try:
-            stream_manager.update_frame(cam_id, frame_bytes, frame_number)
-            stream_manager.update_detections(cam_id, detections)
-            if result_path and detections:
-                _append_frame_result(result_path, frame_number, detections)
-        except Exception as e:
-            print(f"[LiveJob] Detection callback error: {e}")
+    # Queue that LiveStreamPipeline pushes annotated JPEGs into.
+    # MJPEG relay awaits from this queue directly — zero poll delay.
+    frame_queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+    _FRAME_QUEUES[camera_id] = frame_queue
 
-    def on_frame(frame, frame_number):
-        pass
+    done_event = asyncio.Event()
+    _STREAM_DONE[camera_id] = done_event
+
+    # active_event starts SET (we assume the dashboard is watching when you click start).
+    # Cleared by _viewer_disconnect grace timer when no MJPEG viewers remain.
+    active_event = asyncio.Event()
+    active_event.set()
+    _VIEWER_EVENTS[camera_id] = active_event
+    _VIEWER_COUNTS[camera_id] = 0
+
+    def on_detection(person: dict, frame_number: int):
+        """Called from pipeline thread for each detected person."""
+        try:
+            stream_manager.update_detections(camera_id, [person])
+            if result_path:
+                _save_person_to_json(result_path, frame_number, person)
+        except Exception:
+            pass
 
     async def _run_and_finalize():
-        from services.stream_processor import get_stream_processor
+        from src.services.live_pipeline import LiveStreamPipeline
+        print(f"[LiveJob] Starting {job_id} camera={camera_id} skip={ai_frame_skip}")
+        pipeline = LiveStreamPipeline(
+            source=source,
+            camera_id=camera_id,
+            frame_skip=ai_frame_skip,
+            output_queue=frame_queue,
+            on_detection=on_detection,
+            stop_event=stop_event,
+            active_event=active_event,
+        )
         try:
-            processor_instance = await get_stream_processor()
-            await processor_instance.start_stream(
-                camera_id=camera_id,
-                source=source,
-                on_detection=on_detection,
-                on_frame=on_frame,
-                stop_event=stop_event,
-                frame_skip=ai_frame_skip,
-            )
+            await pipeline.run()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"[LiveJob] Pipeline error: {e}")
         finally:
+            _FRAME_QUEUES.pop(camera_id, None)
+            _VIEWER_EVENTS.pop(camera_id, None)
+            _VIEWER_COUNTS.pop(camera_id, None)
+            pt = _PAUSE_TASKS.pop(camera_id, None)
+            if pt and not pt.done():
+                pt.cancel()
             if result_path:
                 _finalize_live_job(job_id)
-                print(f"[LiveJob] Finalized job {job_id}")
+            print(f"[LiveJob] Stopped {job_id}")
             _unregister_stream(camera_id)
+            done_event.set()  # signal stop_prediction that cleanup is complete
 
     background_tasks.add_task(_run_and_finalize)
 
@@ -684,8 +811,32 @@ async def start_prediction(camera_id: str, background_tasks: BackgroundTasks, re
         "camera_id": camera_id,
         "job_id": job_id,
         "ai_frame_skip": ai_frame_skip,
-        "message": f"Prediction started (frame_skip={ai_frame_skip}, saving={'json' if result_path else 'off'})",
+        "message": f"Prediction started (skip={ai_frame_skip}, saving={'json' if result_path else 'off'})",
     }
+
+
+def _save_person_to_json(result_path: "Path", frame_number: int, person: dict) -> None:
+    """Append one person's detection to prediction_results.json (thread-safe)."""
+    with _append_lock:
+        try:
+            data = json.loads(result_path.read_text(encoding="utf-8"))
+            frames = data.setdefault("frames", [])
+            # Find existing frame entry or append new one
+            for f in frames:
+                if f.get("frame") == frame_number:
+                    f.setdefault("persons", []).append(person)
+                    break
+            else:
+                frames.append({
+                    "frame": frame_number,
+                    "time": round(frame_number / 30, 3),
+                    "persons": [person],
+                })
+            tmp = result_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(result_path)
+        except Exception as e:
+            print(f"[LiveJob] JSON save error frame {frame_number}: {e}")
 
 # ─── Live Data API (Optional) ─────────────────────────────────────────────────
 

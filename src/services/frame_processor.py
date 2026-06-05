@@ -212,19 +212,10 @@ class FrameProcessor:
         result = detector.track_people(frame)
         yolo_time = (time.perf_counter() - yolo_start) * 1000
         
-        # Log YOLO timing
-        if frame_number <= 5:  # First few frames
-            print(f"[FrameProcessor] YOLO PREDICTION #{frame_number}: {yolo_time:.2f}ms")
-        elif frame_number % 30 == 0:  # Every 30 frames
-            print(f"[FrameProcessor] YOLO PREDICTION #{frame_number}: {yolo_time:.2f}ms")
-        
         detections = []
-        
+
         if result.boxes is None or len(result.boxes) == 0:
-            print("[FRAME_PROC] YOLO detected: 0 persons")
             return detections
-        
-        print(f"[FRAME_PROC] YOLO detected: {len(result.boxes)} persons")
         
         person_embeddings = (
             getattr(result, "person_embeddings", None)
@@ -331,9 +322,7 @@ class FrameProcessor:
         """
         selection = select_clothing_items(predictions)
         selected = selection.items
-        selected_items_log = [{"class": s.class_name, "category": s.category.value} for s in selected]
-        print(f"[FRAME_PROC] production clothing rules applied")
-        print(f"[FRAME_PROC] Selected items: {selected_items_log}")
+        selected_items_log = [{"class": s.class_name, "category": s.category.value} for s in selected]  # noqa: F841
 
         return selected
 
@@ -373,7 +362,7 @@ class FrameProcessor:
                     color_time = (time.perf_counter() - color_start) * 1000
                     # Log color analysis result
                     color_str = item.primary_color.color_name if item.primary_color else (item.color_groups[0] if item.color_groups else "Unknown")
-                    print(f"[FRAME_PROC] Color analysis for {item.class_name}: {color_time:.2f}ms, primary_color={color_str}, color_groups={item.color_groups}")
+                    _ = color_str  # suppress unused warning
 
             return selection
         
@@ -502,9 +491,7 @@ class FrameProcessor:
         Returns:
             AIProcessingResult
         """
-        print("[FRAME_PROC] process_image() called")
         result = self.process_frame(image, frame_number=0, timestamp=time.time())
-        print(f"[FRAME_PROC] process_image() complete - persons: {result.num_persons}, status: {result.status}")
         return result
 
 

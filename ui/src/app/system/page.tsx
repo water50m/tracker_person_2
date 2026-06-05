@@ -820,14 +820,34 @@ function SystemTab({
 }
 
 // ─── Tab: Database ────────────────────────────────────────────
+interface CameraJobInfo {
+    camera_id: string;
+    stream_jobs: number;
+    video_jobs: number;
+    total_jobs: number;
+}
+
 function DatabaseTab() {
     const [stats, setStats] = useState<{ detections: number; videos: number; cameras: number; store: "db" | "json" } | null>(null);
     const [purging, setPurging] = useState(false);
     const [purgeMsg, setPurgeMsg] = useState<string | null>(null);
+    const [cameraJobs, setCameraJobs] = useState<CameraJobInfo[]>([]);
+    const [selectedCam, setSelectedCam] = useState<string>("");
+    const [deleteType, setDeleteType] = useState<"all" | "stream" | "non_stream">("all");
+    const [deleting, setDeleting] = useState(false);
+    const [deleteMsg, setDeleteMsg] = useState<string | null>(null);
     const backendUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000").replace(
         "://localhost:",
         "://127.0.0.1:"
     );
+
+    const loadCameraJobs = React.useCallback(async () => {
+        const res = await fetch(`${backendUrl}/api/json/cameras`).then((r) => r.json()).catch(() => null);
+        if (res?.cameras) {
+            setCameraJobs(res.cameras);
+            if (res.cameras.length > 0 && !selectedCam) setSelectedCam(res.cameras[0].camera_id);
+        }
+    }, [backendUrl, selectedCam]);
 
     useEffect(() => {
         let cancelled = false;
@@ -869,6 +889,8 @@ function DatabaseTab() {
             cancelled = true;
         };
     }, [backendUrl]);
+
+    useEffect(() => { void loadCameraJobs(); }, [backendUrl]);
 
     return (
         <div className="grid grid-cols-2 gap-6 w-full">
@@ -928,6 +950,100 @@ function DatabaseTab() {
                         </button>
                     </div>
                     {purgeMsg && <p className="font-mono text-sm text-yellow-400 mt-3">{purgeMsg}</p>}
+                </SettingsCard>
+            </div>
+
+            {/* Camera Data Management */}
+            <div className="col-span-2">
+                <SettingsCard title="CAMERA DATA MANAGEMENT">
+                    {cameraJobs.length === 0 ? (
+                        <p className="font-mono text-xs text-slate-600">ไม่พบข้อมูล job ในระบบ</p>
+                    ) : (
+                        <div className="flex flex-col gap-4">
+                            {/* Camera selector */}
+                            <div className="grid grid-cols-3 gap-4">
+                                {cameraJobs.map((cam) => (
+                                    <button
+                                        key={cam.camera_id}
+                                        onClick={() => setSelectedCam(cam.camera_id)}
+                                        className={`border rounded-sm p-3 text-left transition-all ${
+                                            selectedCam === cam.camera_id
+                                                ? "border-cyan-500/60 bg-cyan-950/20"
+                                                : "border-slate-700 bg-slate-900/30 hover:border-slate-600"
+                                        }`}
+                                    >
+                                        <p className={`font-mono text-xs font-bold tracking-widest mb-2 ${selectedCam === cam.camera_id ? "text-cyan-300" : "text-slate-400"}`}>
+                                            {cam.camera_id}
+                                        </p>
+                                        <div className="flex gap-3">
+                                            <span className="font-mono text-[9px] text-blue-400">LIVE {cam.stream_jobs}</span>
+                                            <span className="font-mono text-[9px] text-orange-400">VIDEO {cam.video_jobs}</span>
+                                            <span className="font-mono text-[9px] text-slate-500">TOTAL {cam.total_jobs}</span>
+                                        </div>
+                                    </button>
+                                ))}
+                            </div>
+
+                            {/* Delete type */}
+                            {selectedCam && (
+                                <div className="flex flex-col gap-3 border-t border-slate-800/60 pt-4">
+                                    <FieldLabel>ลบข้อมูลของกล้อง: <span className="text-cyan-400">{selectedCam}</span></FieldLabel>
+                                    <div className="flex gap-2">
+                                        {(["all", "stream", "non_stream"] as const).map((t) => (
+                                            <button
+                                                key={t}
+                                                onClick={() => setDeleteType(t)}
+                                                className={`px-3 py-1.5 font-mono text-xs rounded-sm border transition-all ${
+                                                    deleteType === t
+                                                        ? "border-red-500/60 bg-red-950/20 text-red-300"
+                                                        : "border-slate-700 text-slate-500 hover:border-slate-600"
+                                                }`}
+                                            >
+                                                {t === "all" ? "ทั้งหมด" : t === "stream" ? "LIVE เท่านั้น" : "VIDEO เท่านั้น"}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    <p className="font-mono text-[10px] text-slate-500">
+                                        {deleteType === "all"
+                                            ? `ลบ job ทั้งหมด (LIVE + VIDEO) ของกล้อง ${selectedCam} รวมถึง prediction_results.json และรูปภาพ`
+                                            : deleteType === "stream"
+                                            ? `ลบเฉพาะ job ที่มาจาก live stream (job_id เริ่มด้วย live_) ของกล้อง ${selectedCam}`
+                                            : `ลบเฉพาะ job ที่มาจาก video file ของกล้อง ${selectedCam}`}
+                                    </p>
+                                    <div className="flex items-center gap-3">
+                                        <button
+                                            disabled={deleting}
+                                            onClick={async () => {
+                                                if (!confirm(`ลบข้อมูลประเภท "${deleteType}" ของกล้อง "${selectedCam}"? ไม่สามารถกู้คืนได้`)) return;
+                                                setDeleting(true);
+                                                setDeleteMsg(null);
+                                                try {
+                                                    const res = await fetch(`${backendUrl}/api/json/camera/${encodeURIComponent(selectedCam)}?data_type=${deleteType}`, { method: "DELETE" });
+                                                    const data = await res.json().catch(() => ({}));
+                                                    if (!res.ok) throw new Error(data.detail || "Delete failed");
+                                                    setDeleteMsg(`✓ ลบแล้ว ${data.deleted_count} job`);
+                                                    await loadCameraJobs();
+                                                } catch (e) {
+                                                    setDeleteMsg(`✗ ${e instanceof Error ? e.message : "Error"}`);
+                                                } finally {
+                                                    setDeleting(false);
+                                                    setTimeout(() => setDeleteMsg(null), 4000);
+                                                }
+                                            }}
+                                            className="font-mono text-xs font-bold px-5 py-2 rounded-sm border border-red-500/60 bg-red-950/20 text-red-400 hover:bg-red-900/40 transition-all disabled:opacity-50"
+                                        >
+                                            {deleting ? "DELETING…" : "DELETE"}
+                                        </button>
+                                        {deleteMsg && (
+                                            <span className={`font-mono text-xs ${deleteMsg.startsWith("✓") ? "text-green-400" : "text-red-400"}`}>
+                                                {deleteMsg}
+                                            </span>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </SettingsCard>
             </div>
         </div>

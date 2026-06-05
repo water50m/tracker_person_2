@@ -445,6 +445,20 @@ class JsonInvestigationService:
 
         Fallback (when bbox is missing): serve a pre-saved image file.
         """
+        # Prefer saved image_path (live stream jobs always have this)
+        image_path = person.get("image_path")
+        if image_path:
+            path = Path(str(image_path))
+            if not path.is_absolute():
+                path = (job_dir / path).resolve()
+            if path.exists():
+                try:
+                    relative = path.resolve().relative_to(job_dir.resolve()).as_posix()
+                    return f"/api/json/jobs/{job_id}/files/{relative}"
+                except ValueError:
+                    pass
+
+        # For video jobs: dynamically crop from source video via bbox
         bbox = person.get("bbox")
         if bbox and len(bbox) == 4:
             try:
@@ -454,15 +468,13 @@ class JsonInvestigationService:
                     f"?frame={frame_no}&x1={x1:.1f}&y1={y1:.1f}&x2={x2:.1f}&y2={y2:.1f}"
                 )
             except (TypeError, ValueError):
-                pass  # fall through to file-based fallback
+                pass
 
-        # Fallback: pre-saved image file
-        image_path = person.get("image_path")
-        if not image_path:
-            image_path = self._json_id_image_path(job_dir, track_id)
-        if not image_path:
+        # Last fallback: json_id pre-saved image
+        fallback = self._json_id_image_path(job_dir, track_id)
+        if not fallback:
             return None
-        path = Path(str(image_path))
+        path = Path(str(fallback))
         if not path.is_absolute():
             path = (job_dir / path).resolve()
         try:

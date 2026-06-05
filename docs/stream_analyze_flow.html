@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>stream-analyze Flow</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d1117; color: #e6edf3; font-family: 'Segoe UI', monospace; min-height: 100vh; padding: 32px 16px; }
+  h1 { text-align: center; color: #58a6ff; font-size: 1.4rem; margin-bottom: 6px; letter-spacing: 1px; }
+  .subtitle { text-align: center; color: #8b949e; font-size: 0.78rem; margin-bottom: 32px; font-family: monospace; }
+
+  .flow { display: flex; flex-direction: column; align-items: center; gap: 0; max-width: 860px; margin: 0 auto; }
+
+  /* ── Arrow ── */
+  .arrow { width: 2px; height: 28px; background: linear-gradient(to bottom, #30363d, #58a6ff); position: relative; margin: 0 auto; }
+  .arrow::after { content: '▼'; position: absolute; bottom: -12px; left: 50%; transform: translateX(-50%); color: #58a6ff; font-size: 12px; }
+  .arrow.fat { height: 36px; }
+
+  /* ── Node ── */
+  .node {
+    width: 100%; border-radius: 10px; padding: 14px 20px;
+    border: 1px solid #30363d; position: relative;
+    opacity: 0; transform: translateY(16px);
+    transition: opacity 0.4s ease, transform 0.4s ease;
+  }
+  .node.visible { opacity: 1; transform: translateY(0); }
+  .node-title { font-size: 0.85rem; font-weight: 700; margin-bottom: 4px; }
+  .node-desc { font-size: 0.72rem; color: #8b949e; line-height: 1.5; }
+  .node-code { font-size: 0.68rem; color: #79c0ff; margin-top: 6px; font-family: monospace; background: #161b22; border-radius: 4px; padding: 4px 8px; }
+  .tag { display: inline-block; font-size: 0.6rem; padding: 2px 7px; border-radius: 10px; font-weight: 700; margin-right: 6px; vertical-align: middle; }
+
+  /* Colors by layer */
+  .http    { background: #1c2128; border-color: #388bfd; }
+  .http .node-title { color: #388bfd; }
+  .setup   { background: #1c2128; border-color: #3fb950; }
+  .setup .node-title { color: #3fb950; }
+  .model   { background: #1c2128; border-color: #d29922; }
+  .model .node-title { color: #d29922; }
+  .loop    { background: #161b22; border-color: #bc8cff; border-style: dashed; border-width: 2px; }
+  .loop .node-title { color: #bc8cff; }
+  .ai      { background: #1c2128; border-color: #f78166; }
+  .ai .node-title { color: #f78166; }
+  .save    { background: #1c2128; border-color: #56d364; }
+  .save .node-title { color: #56d364; }
+  .draw    { background: #1c2128; border-color: #ffa657; }
+  .draw .node-title { color: #ffa657; }
+  .yield_  { background: #1c2128; border-color: #58a6ff; }
+  .yield_ .node-title { color: #58a6ff; }
+  .final   { background: #1c2128; border-color: #ff7b72; }
+  .final .node-title { color: #ff7b72; }
+
+  /* Sub-steps inside loop */
+  .substeps { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; padding-left: 16px; border-left: 2px solid #30363d; }
+  .substep { background: #0d1117; border-radius: 6px; padding: 8px 12px; font-size: 0.72rem; border-left: 3px solid; }
+  .substep .s-title { font-weight: 700; font-size: 0.73rem; margin-bottom: 2px; }
+  .substep .s-desc { color: #8b949e; font-size: 0.68rem; line-height: 1.4; }
+  .s1 { border-left-color: #388bfd; } .s1 .s-title { color: #388bfd; }
+  .s2 { border-left-color: #d29922; } .s2 .s-title { color: #d29922; }
+  .s3 { border-left-color: #f78166; } .s3 .s-title { color: #f78166; }
+  .s4 { border-left-color: #bc8cff; } .s4 .s-title { color: #bc8cff; }
+  .s5 { border-left-color: #56d364; } .s5 .s-title { color: #56d364; }
+  .s6 { border-left-color: #ffa657; } .s6 .s-title { color: #ffa657; }
+  .s7 { border-left-color: #58a6ff; } .s7 .s-title { color: #58a6ff; }
+  .s8 { border-left-color: #ff7b72; } .s8 .s-title { color: #ff7b72; }
+
+  /* flush box */
+  .flush-box { margin-top: 12px; background: #0d1117; border: 1px dashed #56d364; border-radius: 6px; padding: 10px 14px; }
+  .flush-box .fb-title { color: #56d364; font-size: 0.72rem; font-weight: 700; margin-bottom: 6px; }
+  .flush-trigger { display: inline-flex; align-items: center; gap: 6px; margin: 3px 4px 3px 0; background: #161b22; border-radius: 12px; padding: 3px 10px; font-size: 0.65rem; color: #e6edf3; border: 1px solid #30363d; }
+  .flush-trigger .dot { width: 7px; height: 7px; border-radius: 50%; }
+  .green { background: #56d364; }
+  .orange { background: #ffa657; }
+  .blue { background: #58a6ff; }
+
+  /* pulse anim on loop border */
+  @keyframes pulse { 0%,100% { border-color: #bc8cff; box-shadow: none; } 50% { border-color: #d2a8ff; box-shadow: 0 0 14px #bc8cff44; } }
+  .loop.visible { animation: pulse 3s ease-in-out infinite; }
+
+  /* data flow badges */
+  .badge-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .badge { font-size: 0.6rem; padding: 2px 8px; border-radius: 10px; background: #161b22; border: 1px solid #30363d; color: #8b949e; }
+  .badge.in  { border-color: #388bfd55; color: #79c0ff; }
+  .badge.out { border-color: #56d36455; color: #7ee787; }
+
+  /* file output */
+  .file-output { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .file-chip { font-size: 0.65rem; padding: 4px 10px; border-radius: 6px; background: #1c2128; border: 1px solid #30363d; font-family: monospace; }
+  .file-chip.interim { border-color: #56d36488; color: #7ee787; }
+  .file-chip.final_ { border-color: #388bfd88; color: #79c0ff; }
+
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-bottom: 24px; }
+  .lg { display: flex; align-items: center; gap: 5px; font-size: 0.65rem; color: #8b949e; }
+  .lg-dot { width: 10px; height: 10px; border-radius: 2px; }
+
+  /* counter badge */
+  #frame-counter { text-align: center; font-family: monospace; font-size: 0.75rem; color: #8b949e; margin: 8px 0 4px; }
+  .counter-num { color: #bc8cff; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<h1>🎬 GET /api/video/stream-analyze</h1>
+<p class="subtitle">video_path=redskirt.mp4 · stream_id=analyze_xxx · save_to_db=false · camera_id=cam-1</p>
+
+<div class="legend">
+  <div class="lg"><div class="lg-dot" style="background:#388bfd"></div>HTTP / Router</div>
+  <div class="lg"><div class="lg-dot" style="background:#3fb950"></div>Setup</div>
+  <div class="lg"><div class="lg-dot" style="background:#d29922"></div>Model Load</div>
+  <div class="lg"><div class="lg-dot" style="background:#bc8cff"></div>Frame Loop</div>
+  <div class="lg"><div class="lg-dot" style="background:#f78166"></div>AI Processing</div>
+  <div class="lg"><div class="lg-dot" style="background:#56d364"></div>JSON Save</div>
+  <div class="lg"><div class="lg-dot" style="background:#ffa657"></div>Draw</div>
+  <div class="lg"><div class="lg-dot" style="background:#58a6ff"></div>Stream Output</div>
+</div>
+
+<div class="flow">
+
+  <!-- 1 HTTP -->
+  <div class="node http" data-delay="0">
+    <div class="node-title">① HTTP GET Request</div>
+    <div class="node-desc">FastAPI รับ request → router <code>video_controller.py</code> → <code>stream_analyze_video()</code></div>
+    <div class="badge-row">
+      <span class="badge in">video_path</span>
+      <span class="badge in">stream_id</span>
+      <span class="badge in">show_detector_bbox=true</span>
+      <span class="badge in">classifier_top_n=2</span>
+      <span class="badge in">save_to_db=false</span>
+      <span class="badge in">camera_id=cam-1</span>
+    </div>
+    <div class="node-code">src/api/video_controller.py → stream_analyze_video()</div>
+  </div>
+  <div class="arrow" data-delay="200"></div>
+
+  <!-- 2 Mode check -->
+  <div class="node setup" data-delay="300">
+    <div class="node-title">② Mode &amp; Flag Check</div>
+    <div class="node-desc">
+      <b>storage_mode = "json"</b> → <code>save_json_results = True</code><br>
+      <code>save_to_db=false</code> → DB/MinIO forced off ใน json mode<br>
+      สร้าง <code>stop_event = asyncio.Event()</code> · ลง <code>_STREAM_ANALYSIS_ACTIVE[stream_id]</code>
+    </div>
+    <div class="node-code">_save_json = get_storage_mode() == "json"  # → True<br>_json_job_id = stream_id</div>
+  </div>
+  <div class="arrow" data-delay="450"></div>
+
+  <!-- 3 Response -->
+  <div class="node http" data-delay="550">
+    <div class="node-title">③ Return StreamingResponse (200 OK)</div>
+    <div class="node-desc">FastAPI ส่ง HTTP 200 กลับทันที พร้อม Content-Type: multipart/x-mixed-replace<br>
+    Generator <code>_cleanup_wrapper</code> → <code>_realtime_analysis_generator()</code> เริ่มทำงาน</div>
+    <div class="badge-row">
+      <span class="badge out">X-Stream-Id: analyze_xxx</span>
+      <span class="badge out">X-Json-Job-Id: analyze_xxx</span>
+    </div>
+  </div>
+  <div class="arrow fat" data-delay="700"></div>
+
+  <!-- 4 Lazy imports -->
+  <div class="node model" data-delay="800">
+    <div class="node-title">④ Lazy Import Pipeline Modules</div>
+    <div class="node-desc">Import เกิดขึ้นครั้งแรกที่ยิง stream (lazy) — ครั้งถัดไปใช้ Python module cache</div>
+    <div class="node-code">
+      from src.ai.clothing_predictor import YoloPredictor, prediction_result<br>
+      from pipeline_shared import OnlineReID, add_item_colors, apply_detailed_color_with_cache, ...<br>
+      from predict_video_clothing_viewer import clamp_bbox, dedupe_persons_by_iou, update_track_votes
+    </div>
+  </div>
+  <div class="arrow" data-delay="950"></div>
+
+  <!-- 5 Model init -->
+  <div class="node model" data-delay="1050">
+    <div class="node-title">⑤ Load AI Models</div>
+    <div class="node-desc">โหลด 2 โมเดล (เกิดขึ้นทุกครั้งที่ generator เริ่ม)</div>
+    <div class="substeps">
+      <div class="substep s2">
+        <div class="s-title">🔍 Person Detector</div>
+        <div class="s-desc">YOLO(yolo11n.pt / yolo11s.pt) → device=cuda/cpu<br>ใช้ track mode + ByteTrack</div>
+      </div>
+      <div class="substep s2">
+        <div class="s-title">👕 Clothing Classifier</div>
+        <div class="s-desc">YoloPredictor(prepare_dataset.pt) · imgsz=224 · conf=0.25<br>รัน classification/detection per crop</div>
+      </div>
+    </div>
+  </div>
+  <div class="arrow" data-delay="1200"></div>
+
+  <!-- 6 Video + JSON setup -->
+  <div class="node setup" data-delay="1300">
+    <div class="node-title">⑥ Video &amp; JSON Output Setup</div>
+    <div class="node-desc">
+      <b>cap = cv2.VideoCapture(video_path)</b> → fps=30.04, 1920×1080<br>
+      สร้าง output dir: <code>track_result/analyze_xxx/</code><br>
+      Copy video → <code>redskirt_cam-1.mp4</code> (stable name, dedup ถ้ามีอยู่แล้ว)<br>
+      Init pipeline state: vote_history, clothing_temporal_cache, detailed_color_cache, OnlineReID
+    </div>
+    <div class="node-code">_json_out_dir = track_result/analyze_xxx/<br>video copy → redskirt_cam-1.mp4</div>
+  </div>
+  <div class="arrow fat" data-delay="1450"></div>
+
+  <!-- 7 Frame Loop -->
+  <div class="node loop" data-delay="1550">
+    <div class="node-title">⑦ Per-Frame Loop  <span style="font-size:0.7rem;color:#8b949e;font-weight:normal">(ทำซ้ำ 614 frames)</span></div>
+    <div id="frame-counter">Frame: <span class="counter-num" id="fc">0</span> / 614</div>
+
+    <div class="substeps">
+      <div class="substep s1">
+        <div class="s-title">↩ Frame Skip</div>
+        <div class="s-desc"><code>frame_count % frame_skip == 0</code> → process AI<br>ถ้าไม่ถึง → yield frame ดิบทันที (ไม่มี AI)</div>
+      </div>
+
+      <div class="substep s3">
+        <div class="s-title">🔍 Person Detection + Tracking</div>
+        <div class="s-desc">
+          <code>YOLO.track(frame, persist=True, tracker="bytetrack.yaml", classes=[0], conf=0.45)</code><br>
+          → ByteTrack ID ต่อเนื่อง · <code>clamp_bbox()</code> กันค่าออกนอก frame
+        </div>
+      </div>
+
+      <div class="substep s2">
+        <div class="s-title">🗂 Clothing Temporal Cache</div>
+        <div class="s-desc">ถ้า cache_frames &gt; 0: ใช้ result เก่าของ track_id นั้น (ไม่รัน classifier ซ้ำ)<br>ตอนนี้ disable (=0) → classify ทุก frame</div>
+      </div>
+
+      <div class="substep s3">
+        <div class="s-title">👕 Clothing Classification</div>
+        <div class="s-desc">
+          <code>YoloPredictor.predict_batch_top_n(crops, top_k=20, batch_size=32)</code><br>
+          → <code>prediction_result(top_preds, conf=0.25, mode="outfit")</code><br>
+          Rule engine: dress wins over top/bottom · skirt×3 vs dress · max 2 items
+        </div>
+      </div>
+
+      <div class="substep s4">
+        <div class="s-title">🎨 Color Analysis (63 สี)</div>
+        <div class="s-desc">
+          <code>add_item_colors()</code> → reid_colors (color_distribution)<br>
+          <code>apply_detailed_color_with_cache()</code> → detailed_colors 63 ชื่อ + color_groups<br>
+          Cache per (track_id, slot) เพื่อไม่ให้วิเคราะห์ซ้ำถ้า class เดิม
+        </div>
+      </div>
+
+      <div class="substep s4">
+        <div class="s-title">🗳 Stable Clothing Vote</div>
+        <div class="s-desc">
+          <code>update_track_votes(vote_history, track_id, final_items)</code><br>
+          Rolling vote window → stable_clothing = {"label", "classes", "items"}
+        </div>
+      </div>
+
+      <div class="substep s4">
+        <div class="s-title">🧬 Reid Profile</div>
+        <div class="s-desc"><code>profile_from_person(person)</code> → reid_profile สำหรับ ReID comparison</div>
+      </div>
+
+      <div class="substep s5">
+        <div class="s-title">📐 IoU Dedup</div>
+        <div class="s-desc"><code>dedupe_persons_by_iou(persons, threshold=0.50)</code><br>ลบ detection ซ้อนทับกัน → เหลือแค่ตัวที่ confident ที่สุดต่อ region</div>
+      </div>
+
+      <div class="substep s4">
+        <div class="s-title">🔄 Online ReID</div>
+        <div class="s-desc">
+          <code>OnlineReID.update(frame_count, persons)</code><br>
+          ตรวจ track_id ที่หาย → compare reid_profile → ถ้า score ≥ 0.70 remap ID เดิม
+        </div>
+      </div>
+
+      <!-- JSON accumulation -->
+      <div class="substep s5">
+        <div class="s-title">💾 JSON Accumulation</div>
+        <div class="s-desc">เก็บ person_entry ใน <code>_json_frame_persons[frame_count]</code><br>
+        อัปเดต <code>_json_track_votes[track_id]</code> ด้วย stable_label ล่าสุด</div>
+      </div>
+    </div>
+
+    <!-- Flush triggers -->
+    <div class="flush-box">
+      <div class="fb-title">⚡ Flush Triggers → เขียน prediction_results.json</div>
+      <div>
+        <span class="flush-trigger"><span class="dot green"></span>New track_id แรก</span>
+        <span class="flush-trigger"><span class="dot orange"></span>ผ่าน 100 frames ต่อ track</span>
+        <span class="flush-trigger"><span class="dot blue"></span>track_id หาย ≥ 30 frames</span>
+      </div>
+      <div style="margin-top:8px;font-size:0.65rem;color:#8b949e;">
+        เขียนแค่ <code style="color:#7ee787">track_votes</code> (lightweight) ระหว่าง loop ·
+        ไม่เขียน frames array ทั้งหมด
+      </div>
+      <div class="file-output">
+        <span class="file-chip interim">📄 track_result/analyze_xxx/prediction_results.json<br><span style="color:#8b949e;font-size:0.6rem">{"metadata":…, "track_votes":{"1":{"stable_label":"short_sleeve, trousers"}…}}</span></span>
+      </div>
+    </div>
+
+    <!-- Draw + Yield -->
+    <div class="substeps" style="margin-top:12px;">
+      <div class="substep s6">
+        <div class="s-title">🖼 Draw Overlays</div>
+        <div class="s-desc">
+          bbox สีเขียว (show_detector_bbox=true) · ID label · class names + confidence<br>
+          Text background สีดำ · ตำแหน่งจาก clamp_bbox absolute coords
+        </div>
+      </div>
+      <div class="substep s7">
+        <div class="s-title">📡 Yield MJPEG Frame</div>
+        <div class="s-desc">
+          <code>cv2.imencode('.jpg', frame, quality=85)</code><br>
+          <code>yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buffer + b"\r\n"</code><br>
+          Frame rate control: <code>asyncio.sleep()</code> ให้ match fps วิดีโอ
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <div class="arrow fat" data-delay="1700"></div>
+
+  <!-- 8 Video End -->
+  <div class="node final" data-delay="1800">
+    <div class="node-title">⑧ Video End → Final Flush</div>
+    <div class="node-desc">
+      cap.read() → ret=False → หยุด loop<br>
+      <code>_flush_json_results(final=True)</code> → เขียน <b>ทุก frames</b> + metadata ครบ<br>
+      Register job ใน <code>index.json</code> → status="completed"
+    </div>
+    <div class="file-output">
+      <span class="file-chip final_">📄 prediction_results.json<br><span style="color:#8b949e;font-size:0.6rem">{"metadata":{"fps":30,"width":1920,…,"status":"completed"}, "frames":[{"frame":0,"persons":[…]},…]}</span></span>
+      <span class="file-chip final_">📋 index.json<br><span style="color:#8b949e;font-size:0.6rem">status: completed</span></span>
+    </div>
+  </div>
+  <div class="arrow" data-delay="1950"></div>
+
+  <!-- 9 Cleanup -->
+  <div class="node http" data-delay="2050">
+    <div class="node-title">⑨ Cleanup</div>
+    <div class="node-desc">
+      <code>cap.release()</code> · <code>_STREAM_ANALYSIS_ACTIVE.pop(stream_id)</code><br>
+      Generator จบ → FastAPI ปิด streaming response
+    </div>
+  </div>
+
+</div>
+
+<!-- Summary bar -->
+<div style="max-width:860px;margin:32px auto 0;background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px 20px;">
+  <div style="color:#58a6ff;font-weight:700;font-size:0.85rem;margin-bottom:10px;">📊 Data ที่ถูก Save ใน prediction_results.json</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:0.72rem;">
+    <div>
+      <div style="color:#56d364;margin-bottom:4px;">🔄 ระหว่าง Processing (track_votes only)</div>
+      <div style="color:#8b949e;line-height:1.6">
+        • stable_label ล่าสุดต่อ track_id<br>
+        • stable_classes (list)<br>
+        • metadata บางส่วน (fps, width, height…)<br>
+        • status: "processing"
+      </div>
+    </div>
+    <div>
+      <div style="color:#388bfd;margin-bottom:4px;">✅ ตอน Final (full frames)</div>
+      <div style="color:#8b949e;line-height:1.6">
+        • frames[] ทุก frame ที่ AI ประมวลผล<br>
+        • per-person: id, bbox, confidence, result_clothing, stable_clothing, reid_recovered<br>
+        • result_clothing: class, confidence, bbox, detailed_colors(63), color_groups<br>
+        • metadata ครบ + status: "completed"
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// Animate nodes in sequence
+const nodes = document.querySelectorAll('.node, .arrow');
+nodes.forEach(el => {
+  const delay = parseInt(el.dataset.delay || 0);
+  setTimeout(() => el.classList.add('visible'), delay + 300);
+});
+
+// Frame counter animation
+let frame = 0;
+const maxFrame = 614;
+const fc = document.getElementById('fc');
+let started = false;
+
+const observer = new IntersectionObserver(entries => {
+  entries.forEach(e => {
+    if (e.isIntersecting && !started) {
+      started = true;
+      const duration = 6000;
+      const steps = 120;
+      const inc = maxFrame / steps;
+      let i = 0;
+      const timer = setInterval(() => {
+        i++;
+        frame = Math.min(Math.round(inc * i), maxFrame);
+        fc.textContent = frame;
+        if (frame >= maxFrame) clearInterval(timer);
+      }, duration / steps);
+    }
+  });
+}, { threshold: 0.3 });
+
+const loopNode = document.querySelector('.node.loop');
+if (loopNode) observer.observe(loopNode);
+</script>
+</body>
+</html>

@@ -332,7 +332,7 @@ export default function StatsWidget() {
   // const currentHourCount = hourlyData[new Date().getHours()].count;
 
   return (
-    <div className="flex gap-3 flex-shrink-0">
+    <div className="flex gap-1.5 flex-shrink-0">
       {/* ── Stat cards ── */}
       {cards.map((card) => {
         const style = ACCENT_STYLES[card.accent];
@@ -340,67 +340,52 @@ export default function StatsWidget() {
           <div
             key={card.label}
             className={`
-              flex-1 hud-panel px-3 py-2.5 flex items-center gap-3
+              flex-1 hud-panel px-2 py-0.5 flex items-center gap-2
               ${style.border} ${style.glow}
               transition-all duration-300
             `}
           >
             {/* Icon */}
-            <div className={`flex-shrink-0 ${style.text} opacity-60`}>
+            <div className={`flex-shrink-0 ${style.text} opacity-50 [&_svg]:w-3 [&_svg]:h-3`}>
               {card.icon}
             </div>
 
-            {/* Value + label */}
-            <div className="flex-1 min-w-0">
-              <div className={`font-orbitron text-lg font-bold leading-none ${style.text}`}>
+            {/* Value · label · delta — all on one row */}
+            <div className="flex-1 flex items-baseline gap-1.5 min-w-0 overflow-hidden">
+              <span className={`font-orbitron text-sm font-bold leading-none flex-shrink-0 ${style.text}`}>
                 <AnimatedNumber target={card.value} suffix={card.suffix} />
-              </div>
-              <div className="font-mono text-[8px] text-slate-600 tracking-widest mt-0.5 truncate">
+              </span>
+              <span className="font-mono text-[7px] text-slate-600 tracking-widest truncate">
                 {card.label}
-              </div>
+              </span>
+              {card.delta !== undefined && (
+                <span className={`flex-shrink-0 flex items-center gap-0.5 font-mono text-[8px] ${card.delta >= 0 ? "text-green-500" : "text-red-500"}`}>
+                  <svg viewBox="0 0 24 24" fill="currentColor" className="w-2 h-2">
+                    <path d={card.delta >= 0 ? "M12 5l7 7H5z" : "M12 19l7-7H5z"} />
+                  </svg>
+                  {Math.abs(card.delta)}%
+                </span>
+              )}
             </div>
-
-            {/* Delta badge */}
-            {card.delta !== undefined && (
-              <div className={`
-                flex-shrink-0 flex items-center gap-0.5 font-mono text-[9px]
-                ${card.delta >= 0 ? "text-green-500" : "text-red-500"}
-              `}>
-                <svg viewBox="0 0 24 24" fill="currentColor" className="w-2.5 h-2.5">
-                  <path d={card.delta >= 0 ? "M12 5l7 7H5z" : "M12 19l7-7H5z"} />
-                </svg>
-                {Math.abs(card.delta)}%
-              </div>
-            )}
           </div>
         );
       })}
 
       {/* ── Sparkline chart ── */}
-      <div className="hud-panel px-3 py-2 flex flex-col min-w-0" style={{ width: 220 }}>
-        <div className="flex items-center justify-between mb-1 flex-shrink-0">
-          <span className="font-orbitron text-[9px] text-slate-500 tracking-widest">24H ACTIVITY</span>
-          <div className="flex items-center gap-2">
-            <span className="font-mono text-[8px] text-slate-600">
-              PEAK <span className="text-cyan-400">{peakHour}</span>
-            </span>
-          </div>
-        </div>
-        <div className="flex-1 min-h-0" style={{ height: 52 }}>
-          <Sparkline data={hourlyData} color="#00f5ff" />
-        </div>
-        {/* Hour labels */}
-        <div className="flex justify-between mt-0.5 flex-shrink-0">
-          {["00", "06", "12", "18", "23"].map((h) => (
-            <span key={h} className="font-mono text-[7px] text-slate-700">{h}</span>
-          ))}
-        </div>
-        {/* Current */}
-        <div className="flex items-center justify-between mt-1 flex-shrink-0">
-          <span className="font-mono text-[8px] text-slate-600">NOW</span>
-          <span className="font-mono text-[10px] text-cyan-400 font-bold tabular-nums">
+      <div className="hud-panel px-2 py-0.5 flex items-center gap-2 min-w-0" style={{ width: 220 }}>
+        {/* Labels stacked */}
+        <div className="flex flex-col justify-center flex-shrink-0">
+          <span className="font-orbitron text-[8px] text-slate-500 tracking-widest leading-none">24H ACTIVITY</span>
+          <span className="font-mono text-[7px] text-slate-600 mt-0.5 leading-none">
+            PEAK <span className="text-cyan-400">{peakHour}</span>
+          </span>
+          <span className="font-mono text-[8px] text-cyan-400 font-bold tabular-nums mt-0.5 leading-none">
             {currentHourCount} det
           </span>
+        </div>
+        {/* Sparkline fills remaining width */}
+        <div className="flex-1" style={{ height: 28 }}>
+          <Sparkline data={hourlyData} color="#00f5ff" height={28} />
         </div>
       </div>
     </div>

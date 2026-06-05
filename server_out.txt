@@ -1,0 +1,5 @@
+[DEBUG] MINIO_BASE_URL forced to: http://myserver:9000
+ℹ️ [Startup] JSON storage mode active; skipped database startup cleanup.
+[VideoController] JSON storage mode active; DB/MinIO save flags forced off.
+[API-TIME] GET /api/video/stream-analyze status=200 duration=4761.8ms
+INFO:     127.0.0.1:50599 - "GET /api/video/stream-analyze?video_path=E%3A%5Cdata%5CPa_training%5CVideo%5Credskirt.mp4&stream_id=dbg_001&show_detector_bbox=true&show_classifier_class_name=true&save_to_db=false HTTP/1.1" 200 OK

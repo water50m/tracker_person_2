@@ -1,5 +1,6 @@
 import os
 import time
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, List
@@ -60,8 +61,44 @@ async def lifespan(app: FastAPI):
     else:
         print("ℹ️ [Startup] JSON storage mode active; skipped database startup cleanup.")
 
+    # ── Start camera health monitor (TCP reachability every 10 min) ───────────
+    from src.services import camera_health
+    health_stop = asyncio.Event()
+    health_task = asyncio.create_task(camera_health.monitor_loop(health_stop))
+
     yield  # Application runs here
-    # (Add shutdown cleanup here if needed)
+
+    # ── Shutdown: stop camera health monitor ──────────────────────────────────
+    health_stop.set()
+    health_task.cancel()
+    try:
+        await health_task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+    # ── Shutdown: stop all active live-prediction streams ─────────────────────
+    try:
+        from src.api.video_controller import _ACTIVE_STREAMS
+        if _ACTIVE_STREAMS:
+            print(f"[Shutdown] Stopping {len(_ACTIVE_STREAMS)} active stream(s)…")
+            for event in list(_ACTIVE_STREAMS.values()):
+                try:
+                    event.set()
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[Shutdown] Error stopping streams: {e}")
+
+    # Unblock any MJPEG relay coroutines waiting on frame queues
+    try:
+        from src.api.routes.dashboard_api import _FRAME_QUEUES
+        for q in list(_FRAME_QUEUES.values()):
+            try:
+                q.put_nowait(b"")  # sentinel to unblock awaiting relays
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 app = FastAPI(title="CCTV AI Analytics System", lifespan=lifespan)

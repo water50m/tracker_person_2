@@ -96,47 +96,33 @@ export default function LiveVideoCanvas() {
     return streamErrorCounts[cameraId] || 0;
   }
 
-  // Fetch cameras
-  useEffect(() => {
-    const fetchCameras = async () => {
-      try {
-        const res = await fetch("/api/dashboard/cameras");
-        if (res.ok) {
-          const data = await res.json();
-          const cams: CameraOption[] = data.cameras || [];
-          setCameras(cams);
-
-          setSelectedCamera(prevSelected => {
-            if (!prevSelected) {
-              // Prioritize cameras that are actively processing
-              const processingCam = cams.find(c => c.is_processing);
-              if (processingCam) {
-                return processingCam;
-              }
-              return cams.length > 0 ? cams[0] : null;
-            }
-            // Update the selected camera with fresh data from server (e.g. is_processing changed)
-            const freshCam = cams.find(c => c.id === prevSelected.id);
-            
-            // If current camera is not processing but another is, switch to the processing one
-            if (!freshCam?.is_processing && !prevSelected.is_processing) {
-              const processingCam = cams.find(c => c.is_processing);
-              if (processingCam) {
-                return processingCam;
-              }
-            }
-            
-            return freshCam || prevSelected;
-          });
+  // Fetch cameras — syncs is_processing state from backend
+  const fetchCameras = useCallback(async () => {
+    try {
+      const res = await fetch("/api/dashboard/cameras");
+      if (!res.ok) return;
+      const data = await res.json();
+      const cams: CameraOption[] = data.cameras || [];
+      setCameras(cams);
+      setSelectedCamera(prevSelected => {
+        if (!prevSelected) {
+          const processingCam = cams.find(c => c.is_processing);
+          return processingCam ?? (cams.length > 0 ? cams[0] : null);
         }
-      } catch (err) {
-        console.error("Failed to fetch cameras:", err);
-      }
-    };
-    fetchCameras();
-    const t = setInterval(fetchCameras, 30000); // 30s refresh for camera list
-    return () => clearInterval(t);
+        const freshCam = cams.find(c => c.id === prevSelected.id);
+        return freshCam ?? prevSelected;
+      });
+    } catch {
+      // silent
+    }
   }, []);
+
+  useEffect(() => {
+    fetchCameras();
+    // 4s poll — fast enough to detect external stop/start, low enough not to spam
+    const t = setInterval(fetchCameras, 4000);
+    return () => clearInterval(t);
+  }, [fetchCameras]);
 
   // Fetch latest detections for the selected camera
   useEffect(() => {
@@ -179,10 +165,11 @@ export default function LiveVideoCanvas() {
         method: "POST"
       });
       if (res.ok) {
-        // Optimistic update
         setSelectedCamera(prev => prev ? { ...prev, is_processing: false } : null);
         setCameras(prev => prev.map(c => c.id === selectedCamera.id ? { ...c, is_processing: false } : c));
         streamKeyRef.current = Date.now();
+        // Confirm state from backend
+        setTimeout(fetchCameras, 800);
       }
     } catch (err) {
       console.error("Failed to stop prediction:", err);
@@ -201,9 +188,12 @@ export default function LiveVideoCanvas() {
         method: "POST"
       });
       if (res.ok) {
+        // Optimistic update so STOP button appears immediately
         setSelectedCamera(prev => prev ? { ...prev, is_processing: true } : null);
         setCameras(prev => prev.map(c => c.id === selectedCamera.id ? { ...c, is_processing: true } : c));
         streamKeyRef.current = Date.now();
+        // Confirm with backend after stream has had time to start
+        setTimeout(fetchCameras, 1500);
       }
     } catch (err) {
       console.error("Failed to start prediction:", err);
@@ -375,6 +365,14 @@ export default function LiveVideoCanvas() {
           <>
             {/* Live MJPEG Stream or Native Player */}
             <div className="w-full h-full relative">
+              {/* Stopping overlay — backend waits for the pipeline to fully finish */}
+              {isStoppingAI && (
+                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-slate-950/80 backdrop-blur-sm">
+                  <div className="w-16 h-16 border-4 border-red-500/20 border-t-red-400 rounded-full animate-spin" />
+                  <p className="font-mono text-xs text-red-300 tracking-widest animate-pulse">STOPPING AI…</p>
+                  <p className="font-mono text-[10px] text-slate-500">finalizing results</p>
+                </div>
+              )}
               {(() => {
                 if (selectedCamera.is_processing) {
                   return (

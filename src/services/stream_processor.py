@@ -223,7 +223,11 @@ class StreamProcessor:
             
             if not await loop.run_in_executor(None, cap.isOpened):
                 raise ValueError(f"Cannot open stream source: {source}")
-            
+
+            # Set read timeout so cap.read() returns within 2s instead of blocking
+            # indefinitely — allows the stop_event check to fire and enables clean shutdown.
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 2000)
+
             # Get stream info (may be 0 for live streams)
             fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
@@ -246,166 +250,146 @@ class StreamProcessor:
             
             # Record start time for URL to first frame timing
             stream_start_time = time.time()
-            print(f"[StreamProcessor] ⏱️ Stream processing started at {stream_start_time:.3f} for camera {self.camera_id}")
-            
-            # Main processing loop
-            consecutive_errors = 0
-            max_consecutive_errors = 10
-            first_frame_captured = False
-            
-            while not self._stop_event.is_set():
-                try:
-                    # Read frame
-                    cv2_start = time.perf_counter()
-                    if hasattr(resolved_source, 'stdout'):
-                        # FFmpeg subprocess - read raw frames
-                        import numpy as np
-                        raw_bytes = resolved_source.stdout.read(width * height * 3)
-                        if len(raw_bytes) == width * height * 3:
-                            frame = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((height, width, 3))
-                            ret = True
+            print(f"[StreamProcessor] Stream started — camera {self.camera_id} skip={stream_frame_skip}")
+
+            # ── Pipelined architecture ────────────────────────────────────────
+            # Stage 1 (reader_task): reads frames continuously into frame_queue
+            #   → camera runs at full speed regardless of AI inference time
+            # Stage 2 (main loop):  pulls from queue, runs YOLO every Nth frame,
+            #   fires on_frame as fire-and-forget into thread pool
+            #   → AI never blocks waiting for cap.read
+            # Stage 3 (thread pool): encode + relay frames concurrently
+            #   → encoding never blocks AI or reading
+            # -----------------------------------------------------------------
+            frame_queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+
+            async def _reader_task():
+                """Continuously read frames from cap into frame_queue."""
+                consecutive_read_errors = 0
+                first_seen = False
+                while not self._stop_event.is_set():
+                    try:
+                        if hasattr(resolved_source, 'stdout'):
+                            import numpy as np
+                            raw_bytes = resolved_source.stdout.read(width * height * 3)
+                            if len(raw_bytes) == width * height * 3:
+                                frame = np.frombuffer(raw_bytes, dtype=np.uint8).reshape((height, width, 3))
+                                ret = True
+                            else:
+                                ret, frame = False, None
                         else:
-                            ret = False
-                            frame = None
-                    else:
-                        # Regular capture
-                        ret, frame = await loop.run_in_executor(None, cap.read)
-                    
-                    cv2_time = (time.perf_counter() - cv2_start) * 1000
-                    
-                    if ret and not first_frame_captured:
-                        first_frame_captured = True
-                        url_to_frame_time = (time.time() - stream_start_time) * 1000
-                        print(f"[StreamProcessor] 🎯 FIRST FRAME CAPTURED: Frame {self._frame_count}, CV2 capture: {cv2_time:.2f}ms, URL to first frame: {url_to_frame_time:.2f}ms")
-                    
-                    if not ret:
-                        # Failed to read frame
-                        consecutive_errors += 1
-                        
-                        if consecutive_errors >= max_consecutive_errors:
-                            print(f"[StreamProcessor] Too many consecutive errors, stopping")
-                            self._stats.status = ProcessingStatus.ERROR
-                            self._stats.error_message = "Too many consecutive frame read errors"
+                            ret, frame = await loop.run_in_executor(None, cap.read)
+
+                        if ret:
+                            if not first_seen:
+                                first_seen = True
+                                latency = (time.time() - stream_start_time) * 1000
+                                print(f"[StreamProcessor] First frame — camera {self.camera_id} latency={latency:.0f}ms")
+                            consecutive_read_errors = 0
+                            if frame_queue.full():
+                                # Drop stale frame to keep queue fresh
+                                try:
+                                    frame_queue.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    pass
+                            await frame_queue.put(frame)
+                        else:
+                            if self._stop_event.is_set():
+                                break
+                            consecutive_read_errors += 1
+                            if consecutive_read_errors >= 10:
+                                print(f"[StreamProcessor] Reader: too many errors, stopping")
+                                self._stats.status = ProcessingStatus.ERROR
+                                self._stats.error_message = "Too many consecutive frame read errors"
+                                self._stop_event.set()
+                                break
+                            await asyncio.sleep(0.1)
+                    except Exception as e:
+                        if not self._stop_event.is_set():
+                            print(f"[StreamProcessor] Reader error: {e}")
+                            consecutive_read_errors += 1
+                            await asyncio.sleep(0.1)
+
+                await frame_queue.put(None)  # sentinel — signals main loop to stop
+
+            reader = asyncio.create_task(_reader_task())
+
+            # Main AI processing loop — reads from queue, never touches cap directly
+            try:
+                while True:
+                    try:
+                        frame = await asyncio.wait_for(frame_queue.get(), timeout=2.5)
+                    except asyncio.TimeoutError:
+                        if self._stop_event.is_set():
                             break
-                        
-                        # Brief pause before retry
-                        await asyncio.sleep(0.1)
                         continue
-                    
-                    # Reset error counter on success
-                    consecutive_errors = 0
-                    
-                    # Increment frame counter
+
+                    if frame is None:  # sentinel from reader
+                        break
+
                     self._frame_count += 1
-                    
-                    # Skip frames (only process every Nth frame)
+
+                    # Skip frames — fire encode as fire-and-forget so next read starts immediately
                     if self._frame_count % stream_frame_skip != 0:
-                        # For skipped frames, draw inherited boxes from last detection
-                        if hasattr(self, '_last_detections') and self._last_detections:
-                            self._draw_inherited_boxes(frame, self._last_detections)
-                        
-                        # Still send frame to MJPEG for smooth streaming
                         if on_frame:
-                            try:
-                                on_frame(frame, self._frame_count)
-                            except Exception as e:
-                                print(f"[StreamProcessor] Frame callback error: {e}")
+                            loop.run_in_executor(None, on_frame, frame, self._frame_count)
                         continue
-                    
-                    # Process frame
+
+                    # AI-processed frame
                     process_start = time.perf_counter()
                     try:
                         result = await self._process_frame(frame, self._frame_count)
                         process_time = (time.perf_counter() - process_start) * 1000
-                        
-                        # Update stats
                         self._stats.processed_frames += 1
-                        
-                        # Handle frame callback
-                        if on_frame:
-                            try:
-                                on_frame(frame, self._frame_count)
-                            except Exception as e:
-                                print(f"[StreamProcessor] Frame callback error: {e}")
-                        
-                        # Handle detections and store for inheritance
+
                         if result.detections:
-                            # Store latest detections for inheritance
                             self._last_detections = result.detections
-                            
                             for person in result.detections:
                                 self._apply_clothing_votes(person, self._frame_count)
-
-                                # Update stats
                                 self._stats.num_persons_detected += 1
                                 self._stats.total_detections += 1
-                                
-                                # Call detection callback
                                 if on_detection:
                                     try:
                                         on_detection(person, self._frame_count)
                                     except Exception as e:
                                         print(f"[StreamProcessor] Detection callback error: {e}")
-                                
-                                # Add to batch for database
                                 if should_save_db:
-                                    # Upload image to MinIO if storage is available
                                     image_path = None
                                     if self._storage and person.bbox and frame is not None:
                                         try:
-                                            # Extract person crop from frame
                                             x, y = max(0, person.bbox.x), max(0, person.bbox.y)
                                             x2 = min(frame.shape[1], person.bbox.x + person.bbox.width)
                                             y2 = min(frame.shape[0], person.bbox.y + person.bbox.height)
-                                            
-                                            if x2 > x and y2 > y:  # Valid bbox
-                                                person_crop = frame[y:y2, x:x2]
-                                                
-                                                # Generate filename
+                                            if x2 > x and y2 > y:
                                                 import uuid
                                                 filename = f"{self.camera_id}/stream/{self._frame_count}_{uuid.uuid4().hex[:8]}.jpg"
-                                                
-                                                # Upload to MinIO (run in thread pool)
-                                                loop = asyncio.get_event_loop()
                                                 image_path = await loop.run_in_executor(
-                                                    None,
-                                                    self._storage.upload_image,
-                                                    person_crop,
-                                                    filename
+                                                    None, self._storage.upload_image, frame[y:y2, x:x2], filename
                                                 )
-                                                
                                                 if image_path:
                                                     print(f"[StreamProcessor] Uploaded image: {image_path}")
                                         except Exception as e:
                                             print(f"[StreamProcessor] Image upload error: {e}")
-                                    
                                     self._add_to_batch(person, self._frame_count, image_path)
-                        
-                        # Handle frame callback AFTER detections are processed
-                        # This ensures detection boxes are drawn on the frame before MJPEG streaming
+
+                        # Fire-and-forget encode+relay — AI loop doesn't wait for encoding
                         if on_frame:
-                            try:
-                                on_frame(frame, self._frame_count)
-                            except Exception as e:
-                                print(f"[StreamProcessor] Frame callback error: {e}")
-                        
-                        # Save batch to database periodically
+                            loop.run_in_executor(None, on_frame, frame, self._frame_count)
+
                         if len(self._detection_batch) >= self.batch_size:
                             await self._flush_batch(db)
-                    
+
                     except Exception as e:
                         print(f"[StreamProcessor] Frame processing error: {e}")
                         self._stats.num_errors += 1
-                
-                except Exception as e:
-                    print(f"[StreamProcessor] Frame read/processing error: {e}")
-                    consecutive_errors += 1
-                    self._stats.num_errors += 1
-                    
-                    # Brief pause before retry
-                    await asyncio.sleep(0.1)
-                    continue
-            
+
+            finally:
+                reader.cancel()
+                try:
+                    await reader
+                except (asyncio.CancelledError, Exception):
+                    pass
+
             # Cleanup
             await loop.run_in_executor(None, cap.release)
             
@@ -972,10 +956,11 @@ class StreamManager:
         on_frame: Optional[FrameCallback] = None,
         stop_event: Optional[asyncio.Event] = None,
         frame_skip: int = 5,
+        save_to_db: bool = False,
     ) -> StreamProcessor:
         """
         Start a new stream.
-        
+
         Args:
             camera_id: Camera identifier
             source: Stream source (RTSP, webcam)
@@ -983,43 +968,50 @@ class StreamManager:
             on_frame: Frame callback
             stop_event: Stop event
             frame_skip: Frame skip interval
-        
+
         Returns:
             StreamProcessor instance
         """
+        # Stop existing stream outside the lock to avoid holding threading.Lock
+        # while awaiting async operations (would block the event loop).
+        existing_processor = None
+        existing_task = None
         with self._lock:
-            # Stop existing stream if any
             if camera_id in self._streams:
-                print(f"[StreamManager] Stopping existing stream for {camera_id}")
-                self._streams[camera_id].stop_stream()
-                if camera_id in self._tasks:
-                    try:
-                        await asyncio.wait_for(self._tasks[camera_id], timeout=5.0)
-                    except asyncio.TimeoutError:
-                        self._tasks[camera_id].cancel()
-            
-            # Create new processor
-            processor = StreamProcessor(
-                thread_pool=self.thread_pool,
-                camera_id=camera_id,
-                frame_skip=frame_skip,
+                existing_processor = self._streams.pop(camera_id)
+                existing_task = self._tasks.pop(camera_id, None)
+
+        if existing_processor is not None:
+            print(f"[StreamManager] Stopping existing stream for {camera_id}")
+            existing_processor.stop_stream()
+            if existing_task and not existing_task.done():
+                try:
+                    await asyncio.wait_for(existing_task, timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    existing_task.cancel()
+
+        # Create new processor
+        processor = StreamProcessor(
+            thread_pool=self.thread_pool,
+            camera_id=camera_id,
+            frame_skip=frame_skip,
+            save_to_db=save_to_db,
+        )
+
+        task = asyncio.create_task(
+            processor.start_stream(
+                source=source,
+                on_detection=on_detection,
+                on_frame=on_frame,
+                stop_event=stop_event,
             )
-            
+        )
+
+        with self._lock:
             self._streams[camera_id] = processor
-            
-            # Start stream task
-            task = asyncio.create_task(
-                processor.start_stream(
-                    source=source,
-                    on_detection=on_detection,
-                    on_frame=on_frame,
-                    stop_event=stop_event,
-                )
-            )
-            
             self._tasks[camera_id] = task
-            
-            return processor
+
+        return processor
     
     async def stop_stream(self, camera_id: str) -> Optional[StreamProcessingStats]:
         """
@@ -1034,28 +1026,22 @@ class StreamManager:
         with self._lock:
             if camera_id not in self._streams:
                 return None
-            
-            processor = self._streams[camera_id]
-            task = self._tasks.get(camera_id)
-            
-            # Signal stop
-            processor.stop_stream()
-            
-            # Wait for task to complete
-            if task:
-                try:
-                    stats = await asyncio.wait_for(task, timeout=10.0)
-                except asyncio.TimeoutError:
-                    task.cancel()
-                    stats = processor.get_stats()
-            else:
+            processor = self._streams.pop(camera_id)
+            task = self._tasks.pop(camera_id, None)
+
+        # Signal stop and await outside the lock so we don't block the event loop.
+        processor.stop_stream()
+
+        if task and not task.done():
+            try:
+                stats = await asyncio.wait_for(task, timeout=10.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                task.cancel()
                 stats = processor.get_stats()
-            
-            # Cleanup
-            del self._streams[camera_id]
-            del self._tasks[camera_id]
-            
-            return stats
+        else:
+            stats = processor.get_stats()
+
+        return stats
     
     def get_stream(self, camera_id: str) -> Optional[StreamProcessor]:
         """

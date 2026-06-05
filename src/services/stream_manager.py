@@ -16,21 +16,12 @@ class StreamManager:
 
     def update_frame(self, camera_id: str, frame_bytes: bytes, frame_number: int = 0):
         """Update the latest JPEG frame for a camera"""
-        import time
-        timestamp = time.strftime("%H:%M:%S", time.localtime())
-        print(f"[{timestamp}] Frame #{frame_number} stored for camera {camera_id}, size: {len(frame_bytes)} bytes")
         self.latest_frames[camera_id] = frame_bytes
         self.latest_frame_numbers[camera_id] = frame_number
         
     def get_frame(self, camera_id: str) -> Optional[bytes]:
         """Get the latest JPEG frame"""
-        frame = self.latest_frames.get(camera_id)
-        frame_number = self.latest_frame_numbers.get(camera_id, 0)
-        if frame:
-            import time
-            timestamp = time.strftime("%H:%M:%S", time.localtime())
-            print(f"[{timestamp}] Frame #{frame_number} retrieved for camera {camera_id}, size: {len(frame)} bytes")
-        return frame
+        return self.latest_frames.get(camera_id)
 
     def update_detections(self, camera_id: str, detections: list):
         """Update the latest detection data for API/Interactive use"""

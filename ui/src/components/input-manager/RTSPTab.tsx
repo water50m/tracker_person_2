@@ -49,6 +49,9 @@ export default function RTSPTab() {
   const [activeStreams, setActiveStreams] = useState<string[]>([]);
   const [stoppingCams, setStoppingCams] = useState<Set<string>>(new Set());
   const addTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // camera_id → { reachable, latency_ms, checked_at, error }
+  const [health, setHealth] = useState<Record<string, { reachable: boolean; latency_ms: number | null; checked_at: string; error: string | null }>>({});
+  const [recheckingCams, setRecheckingCams] = useState<Set<string>>(new Set());
 
   const loadStreams = useCallback(async () => {
     setIsLoadingStreams(true);
@@ -92,6 +95,33 @@ export default function RTSPTab() {
     const t = setInterval(poll, 5000);
     return () => clearInterval(t);
   }, []);
+
+  // ── Poll camera reachability (backend checks every 10 min; we refresh the view) ──
+  const loadHealth = useCallback(async () => {
+    try {
+      const r = await fetch("/api/dashboard/camera-health", { cache: "no-store" });
+      if (r.ok) { const d = await r.json(); setHealth(d.health ?? {}); }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    void loadHealth();
+    const t = setInterval(loadHealth, 60000); // refresh view every 1 min
+    return () => clearInterval(t);
+  }, [loadHealth]);
+
+  // ── Reconnect: force an immediate reachability recheck ─────
+  const handleReconnect = async (camId: string) => {
+    setRecheckingCams((s) => new Set(s).add(camId));
+    try {
+      const r = await fetch(`/api/dashboard/camera-health/${encodeURIComponent(camId)}/recheck`, { method: "POST" });
+      if (r.ok) {
+        const d = await r.json();
+        if (d.status) setHealth((prev) => ({ ...prev, [camId]: d.status }));
+      }
+    } catch { /* ignore */ }
+    setRecheckingCams((s) => { const n = new Set(s); n.delete(camId); return n; });
+  };
 
   // ── Test RTSP connection ───────────────────────────────────
   const handleTest = async () => {
@@ -184,17 +214,6 @@ export default function RTSPTab() {
     if (selectedStream?.camera_id === camId) setSelectedStream(null);
   };
 
-  // ── Toggle stream status (simulate reconnect) ──────────────
-  const handleToggle = (camId: string) => {
-    setStreams((prev) =>
-      prev.map((s) =>
-        s.camera_id === camId
-          ? { ...s, status: s.status === "live" ? "offline" : "live" }
-          : s
-      )
-    );
-  };
-
   // ── Stop AI processing ────────────────────────────────────
   const handleStop = async (camId: string) => {
     setStoppingCams((s) => new Set(s).add(camId));
@@ -206,7 +225,15 @@ export default function RTSPTab() {
     setStoppingCams((s) => { const n = new Set(s); n.delete(camId); return n; });
   };
 
-  const liveCount = streams.filter((s) => s.status === "live").length;
+  // Derive reachability status from health map.
+  // "live" = reachable, "error" = unreachable, "offline" = not yet checked.
+  const statusOf = (camId: string): RTSPStream["status"] => {
+    const h = health[camId];
+    if (!h) return "offline";
+    return h.reachable ? "live" : "error";
+  };
+
+  const liveCount = streams.filter((s) => statusOf(s.camera_id) === "live").length;
 
   return (
     <div className="flex gap-4 h-full min-h-0">
@@ -396,13 +423,15 @@ export default function RTSPTab() {
             streams.map((stream) => (
               <StreamRow
                 key={stream.camera_id}
-                stream={stream}
+                stream={{ ...stream, status: statusOf(stream.camera_id) }}
+                health={health[stream.camera_id]}
                 selected={selectedStream?.camera_id === stream.camera_id}
                 isProcessing={activeStreams.includes(stream.camera_id)}
                 isStopping={stoppingCams.has(stream.camera_id)}
+                isRechecking={recheckingCams.has(stream.camera_id)}
                 onSelect={() => setSelectedStream(stream.camera_id === selectedStream?.camera_id ? null : stream)}
                 onRemove={() => handleRemove(stream.camera_id)}
-                onToggle={() => handleToggle(stream.camera_id)}
+                onReconnect={() => handleReconnect(stream.camera_id)}
                 onStop={() => handleStop(stream.camera_id)}
               />
             ))
@@ -413,7 +442,7 @@ export default function RTSPTab() {
         <div className="border-t border-slate-800/30 px-4 py-2 flex-shrink-0 flex items-center justify-between">
           <div className="flex items-center gap-4">
             {(["live", "offline", "error"] as RTSPStream["status"][]).map((s) => {
-              const count = streams.filter((x) => x.status === s).length;
+              const count = streams.filter((x) => statusOf(x.camera_id) === s).length;
               const st = STATUS_STYLE[s];
               return (
                 <div key={s} className="flex items-center gap-1.5">
@@ -436,21 +465,25 @@ export default function RTSPTab() {
 
 function StreamRow({
   stream,
+  health,
   selected,
   isProcessing,
   isStopping,
+  isRechecking,
   onSelect,
   onRemove,
-  onToggle,
+  onReconnect,
   onStop,
 }: {
   stream: RTSPStream;
+  health?: { reachable: boolean; latency_ms: number | null; checked_at: string; error: string | null };
   selected: boolean;
   isProcessing: boolean;
   isStopping: boolean;
+  isRechecking: boolean;
   onSelect: () => void;
   onRemove: () => void;
-  onToggle: () => void;
+  onReconnect: () => void;
   onStop: () => void;
 }) {
   const style = STATUS_STYLE[stream.status];
