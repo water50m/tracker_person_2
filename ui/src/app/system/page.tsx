@@ -9,6 +9,7 @@ interface StreamConfig {
     target_fps: number;
     buffer_size: number;
     ai_frame_skip: number;
+    processing_width: number;
 }
 
 interface SystemConfig {
@@ -506,6 +507,7 @@ function StreamTab({
         target_fps: 15,
         buffer_size: 1,
         ai_frame_skip: 5,
+        processing_width: 640,
         ...(draft.stream ?? {}),
     };
 
@@ -617,12 +619,28 @@ function StreamTab({
                         ยิ่ง N น้อย ยิ่ง detect ถี่ แต่ใช้ GPU/CPU มากขึ้น
                     </InfoBox>
                 </SettingsCard>
+
+                {/* Processing Width */}
+                <SettingsCard title="AI PROCESSING — FRAME RESIZE">
+                    <SliderField
+                        label="PROCESSING WIDTH"
+                        description="resize frame ก่อนส่ง AI — ลด GPU/CPU load สำหรับกล้อง 1080p ขึ้นไป"
+                        value={stream.processing_width}
+                        min={320} max={1920} step={160}
+                        display={(v) => `${v}px`}
+                        onChange={(v) => set({ processing_width: v })}
+                    />
+                    <InfoBox color="amber">
+                        640px = แนะนำ (เร็ว, แม่นพอสำหรับ person detect), 1280px = คุณภาพสูงขึ้น แต่หนักกว่า 2x
+                        ถ้ากล้องส่ง 480p อยู่แล้ว ค่านี้จะไม่มีผล (ไม่ upscale)
+                    </InfoBox>
+                </SettingsCard>
             </div>
 
             {/* Summary */}
             <div className="col-span-2">
                 <SettingsCard title="CURRENT CONFIG SUMMARY">
-                    <div className="grid grid-cols-5 gap-4">
+                    <div className="grid grid-cols-6 gap-4">
                         <SummaryCell label="MODE" value={mode.toUpperCase()} color="text-cyan-400" />
                         <SummaryCell
                             label={mode === "fixed" ? "SKIP N" : "TARGET FPS"}
@@ -631,6 +649,7 @@ function StreamTab({
                         />
                         <SummaryCell label="BUFFER" value={`${stream.buffer_size} frame`} color="text-slate-300" />
                         <SummaryCell label="AI SKIP" value={`N = ${stream.ai_frame_skip}`} color="text-purple-400" />
+                        <SummaryCell label="PROC WIDTH" value={`${stream.processing_width}px`} color="text-amber-400" />
                         <SummaryCell
                             label="EST. LATENCY"
                             value={

@@ -142,6 +142,18 @@ def get_stream_config() -> dict:
     return {**defaults, **config.get("stream", {})}
 
 
+def get_reid_config() -> dict:
+    """Return reid settings with defaults."""
+    config = load_config()
+    defaults = {
+        "use_embedding": False,
+        "color_weight": 0.6,
+        "clothes_weight": 0.4,
+        "recovery_threshold": 0.65,
+    }
+    return {**defaults, **config.get("reid", {})}
+
+
 def get_color_remove_background() -> bool:
     """Whether to run BG removal (rembg / GrabCut) before color analysis."""
     config = load_config()

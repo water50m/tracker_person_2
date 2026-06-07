@@ -465,12 +465,24 @@ async def _mjpeg_generator(source: str, camera_id: str, request: Request) -> Asy
                     continue
                 # AI active but queue not registered yet — fall through to raw frame
 
-            # AI stream ended (camera no longer active). If we already released the
-            # raw cap when switching to AI frames, end this connection cleanly so the
-            # browser reconnects for raw video — otherwise we'd busy-loop on a dead cap.
+            # AI stream ended (camera no longer active). If we hotswitched to the AI queue
+            # earlier (cap_released=True), reopen the raw cap and continue — this keeps
+            # the browser connection alive so the viewer doesn't need to reconnect.
             if cap_released:
-                print(f"[MJPEG] AI ended, raw cap was released — ending stream for {camera_id}")
-                return
+                print(f"[MJPEG] AI ended, reopening raw cap — camera {camera_id}")
+                if counted_as_viewer:
+                    _viewer_disconnect(camera_id)
+                    counted_as_viewer = False
+                try:
+                    cap = await loop.run_in_executor(None, _open_capture)
+                    if not await loop.run_in_executor(None, cap.isOpened):
+                        print(f"[MJPEG] Cannot reopen raw cap — camera {camera_id}")
+                        return
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, buf_size)
+                    cap_released = False
+                except Exception as _e:
+                    print(f"[MJPEG] Reopen error — camera {camera_id}: {_e}")
+                    return
 
             if mode == "none":
                 ok, frame = await loop.run_in_executor(None, cap.read)
@@ -740,6 +752,8 @@ async def start_prediction(camera_id: str, background_tasks: BackgroundTasks):
 
     scfg = get_stream_config()
     ai_frame_skip = max(1, int(scfg.get("ai_frame_skip", 5)))
+    processing_width = max(320, int(scfg.get("processing_width", 640)))
+    output_height = max(0, int(scfg.get("output_height", 1080)))
 
     stop_event = _register_stream(camera_id)
 
@@ -780,6 +794,8 @@ async def start_prediction(camera_id: str, background_tasks: BackgroundTasks):
             source=source,
             camera_id=camera_id,
             frame_skip=ai_frame_skip,
+            processing_width=processing_width,
+            output_height=output_height,
             output_queue=frame_queue,
             on_detection=on_detection,
             stop_event=stop_event,

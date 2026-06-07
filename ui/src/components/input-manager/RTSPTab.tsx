@@ -202,6 +202,26 @@ export default function RTSPTab() {
     addTimeoutRef.current = setTimeout(() => setAddStatus("idle"), 2000);
   };
 
+  // ── Edit stream URL ────────────────────────────────────────
+  const handleEditUrl = async (camId: string, newUrl: string, label?: string): Promise<boolean> => {
+    const url = newUrl.trim();
+    if (!isValidStreamSource(url)) return false;
+    try {
+      const response = await fetch("/api/input/rtsp-streams", {
+        method: "POST", // backend upserts by camera_id
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_url: url, camera_id: camId, label: label || camId }),
+      });
+      if (!response.ok) return false;
+    } catch {
+      return false;
+    }
+    // Update local list + recheck reachability with the new URL
+    setStreams((prev) => prev.map((s) => (s.camera_id === camId ? { ...s, rtsp_url: url } : s)));
+    void handleReconnect(camId);
+    return true;
+  };
+
   // ── Remove stream ──────────────────────────────────────────
   const handleRemove = async (camId: string) => {
     try {
@@ -400,7 +420,7 @@ export default function RTSPTab() {
 
         {/* Column headers */}
         <div className="grid gap-2 px-4 py-1.5 border-b border-slate-800/30 flex-shrink-0"
-          style={{ gridTemplateColumns: "90px 1fr 110px 90px 70px 60px 110px 110px" }}>
+          style={{ gridTemplateColumns: "90px 1fr 120px 80px 60px 56px 100px 140px" }}>
           {["CAM ID", "URL / LABEL", "STATUS", "RESOLUTION", "FPS", "LAT", "AI STATUS", "ACTIONS"].map((h) => (
             <span key={h} className="font-mono text-[9px] text-slate-700 tracking-widest uppercase">{h}</span>
           ))}
@@ -433,6 +453,7 @@ export default function RTSPTab() {
                 onRemove={() => handleRemove(stream.camera_id)}
                 onReconnect={() => handleReconnect(stream.camera_id)}
                 onStop={() => handleStop(stream.camera_id)}
+                onEditUrl={(newUrl) => handleEditUrl(stream.camera_id, newUrl, stream.label)}
               />
             ))
           )}
@@ -474,6 +495,7 @@ function StreamRow({
   onRemove,
   onReconnect,
   onStop,
+  onEditUrl,
 }: {
   stream: RTSPStream;
   health?: { reachable: boolean; latency_ms: number | null; checked_at: string; error: string | null };
@@ -485,10 +507,30 @@ function StreamRow({
   onRemove: () => void;
   onReconnect: () => void;
   onStop: () => void;
+  onEditUrl: (newUrl: string) => Promise<boolean>;
 }) {
   const style = STATUS_STYLE[stream.status];
   const accent = CAMERA_ACCENTS[stream.camera_id] ?? DEFAULT_ACCENT;
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editUrl, setEditUrl] = useState(stream.rtsp_url);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState(false);
+
+  const handleSaveEdit = async () => {
+    setSavingEdit(true);
+    setEditError(false);
+    const ok = await onEditUrl(editUrl);
+    setSavingEdit(false);
+    if (ok) setEditing(false);
+    else setEditError(true);
+  };
+
+  const startEdit = () => {
+    setEditUrl(stream.rtsp_url);
+    setEditError(false);
+    setEditing(true);
+  };
 
   const handleRemoveClick = () => {
     if (confirmRemove) { onRemove(); }
@@ -505,7 +547,7 @@ function StreamRow({
         ${selected ? "bg-slate-800/40" : "hover:bg-slate-900/30"}
         ${isProcessing ? "border-l-2 border-cyan-500/40" : "border-l-2 border-transparent"}
       `}
-      style={{ gridTemplateColumns: "90px 1fr 110px 90px 70px 60px 110px 110px" }}
+      style={{ gridTemplateColumns: "90px 1fr 120px 80px 60px 56px 100px 140px" }}
       onClick={onSelect}
     >
       {/* Cam ID */}
@@ -513,16 +555,55 @@ function StreamRow({
         {stream.camera_id}
       </span>
 
-      {/* URL / Label */}
-      <div className="min-w-0">
+      {/* URL / Label — inline editable */}
+      <div className="min-w-0" onClick={(e) => editing && e.stopPropagation()}>
         <div className="font-mono text-xs text-slate-300 truncate">{stream.label ?? stream.camera_id}</div>
-        <div className="font-mono text-[10px] text-slate-600 truncate">{stream.rtsp_url}</div>
+        {editing ? (
+          <div className="flex items-center gap-1 mt-0.5">
+            <input
+              autoFocus
+              value={editUrl}
+              onChange={(e) => { setEditUrl(e.target.value); setEditError(false); }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void handleSaveEdit();
+                if (e.key === "Escape") setEditing(false);
+              }}
+              disabled={savingEdit}
+              className={`flex-1 min-w-0 bg-slate-900/80 border rounded-sm px-1.5 py-0.5 font-mono text-[10px]
+                text-slate-200 outline-none ${editError ? "border-red-600/70" : "border-cyan-700/60 focus:border-cyan-500"}`}
+            />
+            <button
+              onClick={() => void handleSaveEdit()}
+              disabled={savingEdit}
+              title="Save URL"
+              className="p-0.5 rounded-sm border border-green-700/60 text-green-400 hover:bg-green-950/40 disabled:opacity-40"
+            >
+              {savingEdit ? (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3 h-3 animate-spin"><path d="M12 2v4M4.93 4.93l2.83 2.83M2 12h4" /></svg>
+              ) : (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} className="w-3 h-3"><path d="M20 6L9 17l-5-5" /></svg>
+              )}
+            </button>
+            <button
+              onClick={() => setEditing(false)}
+              disabled={savingEdit}
+              title="Cancel"
+              className="p-0.5 rounded-sm border border-slate-700 text-slate-500 hover:text-slate-300 disabled:opacity-40"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} className="w-3 h-3"><path d="M18 6L6 18M6 6l12 12" /></svg>
+            </button>
+          </div>
+        ) : (
+          <div className="font-mono text-[10px] text-slate-600 truncate">{stream.rtsp_url}</div>
+        )}
       </div>
 
-      {/* Status */}
-      <div className="flex items-center gap-1.5">
+      {/* Status — green=reachable, red=unreachable, grey=unknown */}
+      <div className="flex items-center gap-1.5" title={health?.error ? `Unreachable: ${health.error}` : health?.checked_at ? `Checked: ${new Date(health.checked_at).toLocaleTimeString()}` : "Not checked yet"}>
         <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${style.dot}`} />
-        <span className={`font-mono text-[10px] ${style.text}`}>{stream.status.toUpperCase()}</span>
+        <span className={`font-mono text-[10px] ${style.text}`}>
+          {stream.status === "live" ? "ACTIVE" : stream.status === "error" ? "CAN'T CONNECT" : "UNKNOWN"}
+        </span>
       </div>
 
       {/* Resolution */}
@@ -533,9 +614,9 @@ function StreamRow({
         {stream.fps != null ? <><span className="text-cyan-400">{stream.fps}</span> fps</> : "—"}
       </span>
 
-      {/* Latency placeholder */}
+      {/* Latency — real TCP connect time */}
       <span className="font-mono text-[9px] text-slate-600">
-        {stream.status === "live" ? `${30 + Math.floor(Math.random() * 20)}ms` : "—"}
+        {health?.reachable && health.latency_ms != null ? `${Math.round(health.latency_ms)}ms` : "—"}
       </span>
 
       {/* AI STATUS */}
@@ -552,20 +633,29 @@ function StreamRow({
 
       {/* Actions */}
       <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-        {/* Toggle */}
+        {/* Edit URL */}
         <button
-          onClick={onToggle}
-          title={stream.status === "live" ? "Pause stream" : "Resume stream"}
-          className={`p-1 rounded-sm border transition-colors ${stream.status === "live"
-            ? "border-slate-700 text-slate-500 hover:border-yellow-700 hover:text-yellow-400"
-            : "border-slate-700 text-slate-600 hover:border-green-700 hover:text-green-400"
-            }`}
+          onClick={startEdit}
+          title="Edit stream URL"
+          className="p-1 rounded-sm border border-slate-700 text-slate-500 hover:border-yellow-700 hover:text-yellow-400 transition-colors"
         >
-          {stream.status === "live" ? (
-            <svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
-          ) : (
-            <svg viewBox="0 0 24 24" fill="currentColor" className="w-3 h-3"><path d="M8 5v14l11-7z" /></svg>
-          )}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-3 h-3">
+            <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+            <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+          </svg>
+        </button>
+
+        {/* Reconnect — force an immediate reachability recheck */}
+        <button
+          onClick={onReconnect}
+          disabled={isRechecking}
+          title="Reconnect (recheck reachability now)"
+          className="p-1 rounded-sm border border-slate-700 text-slate-500 hover:border-cyan-700 hover:text-cyan-400 transition-colors disabled:opacity-40"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={`w-3 h-3 ${isRechecking ? "animate-spin" : ""}`}>
+            <path d="M23 4v6h-6M1 20v-6h6" />
+            <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+          </svg>
         </button>
 
         {/* STOP AI */}
@@ -651,7 +741,7 @@ function TestResultBadge({ result }: { result: RTSPTestResult }) {
   return (
     <div className="flex items-center gap-1.5 px-2 py-1 rounded-sm border border-red-800/60 bg-red-950/30">
       <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
-      <span className="font-mono text-[8px] text-red-400">UNREACHABLE</span>
+      <span className="font-mono text-[8px] text-red-400">CAN&apos;T CONNECT</span>
     </div>
   );
 }

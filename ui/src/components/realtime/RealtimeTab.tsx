@@ -108,7 +108,7 @@ export default function RealtimeTab() {
   }>({});
 
   // Camera dropdown state
-  const [cameraList, setCameraList] = useState<Array<{ id: string; name: string; is_active: boolean }>>([]);
+  const [cameraList, setCameraList] = useState<Array<{ id: string; name: string; is_active: boolean; reachable?: boolean | null }>>([]);
   const [isLoadingCameras, setIsLoadingCameras] = useState(false);
   const [showCameraDropdown, setShowCameraDropdown] = useState(false);
   const cameraDropdownRef = useRef<HTMLDivElement>(null);
@@ -152,19 +152,61 @@ export default function RealtimeTab() {
   // Fetch cameras on mount
   useEffect(() => {
     if (storageMode === null) return;
-    if (isJsonMode) {
-      setCameraList([]);
-      setIsLoadingCameras(false);
-      return;
-    }
 
     const fetchCameras = async () => {
       setIsLoadingCameras(true);
       try {
-        const response = await fetch(`${backendUrl}/api/cameras`);
-        if (response.ok) {
-          const data = await response.json();
-          setCameraList(data.cameras || []);
+        // Fetch stream registry + health in parallel
+        const [streamRes, healthRes] = await Promise.all([
+          fetch(`/api/input/rtsp-streams`, { cache: "no-store" }),
+          fetch(`/api/dashboard/camera-health`, { cache: "no-store" }),
+        ]);
+
+        const healthMap: Record<string, boolean | null> = {};
+        if (healthRes.ok) {
+          const hData = await healthRes.json();
+          const h: Record<string, { reachable: boolean }> = hData.health ?? {};
+          Object.entries(h).forEach(([camId, val]) => {
+            healthMap[camId] = val.reachable;
+          });
+        }
+
+        const streamCameras: Array<{ id: string; name: string; is_active: boolean; reachable?: boolean | null }> = [];
+        if (streamRes.ok) {
+          const data = await streamRes.json();
+          const rows: Array<{ camera_id: string }> = Array.isArray(data.streams) ? data.streams : [];
+          rows.forEach((row) => {
+            if (row.camera_id) {
+              streamCameras.push({
+                id: row.camera_id,
+                name: row.camera_id,
+                is_active: healthMap[row.camera_id] === true,
+                reachable: healthMap[row.camera_id] ?? null,
+              });
+            }
+          });
+        }
+
+        if (isJsonMode) {
+          setCameraList(streamCameras);
+          return;
+        }
+
+        // DB mode: merge db cameras + stream cameras (deduped by name)
+        const dbRes = await fetch(`${backendUrl}/api/cameras`);
+        if (dbRes.ok) {
+          const data = await dbRes.json();
+          const dbCameras: Array<{ id: string; name: string; is_active: boolean }> = data.cameras || [];
+          const dbNames = new Set(dbCameras.map((c) => c.name));
+          const extra = streamCameras.filter((s) => !dbNames.has(s.name));
+          // Attach reachable status to db cameras too
+          const dbWithHealth = dbCameras.map((c) => ({
+            ...c,
+            reachable: healthMap[c.name] ?? null,
+          }));
+          setCameraList([...dbWithHealth, ...extra]);
+        } else {
+          setCameraList(streamCameras);
         }
       } catch (err) {
         console.error("[Realtime] Failed to fetch cameras:", err);
@@ -1197,10 +1239,10 @@ export default function RealtimeTab() {
                             <span className="font-mono text-sm text-slate-300">{camera.name}</span>
                             <span
                               className={`text-xs font-mono ${
-                                camera.is_active ? "text-green-400" : "text-slate-500"
+                                camera.reachable === true ? "text-green-400" : camera.reachable === false ? "text-red-400" : "text-slate-500"
                               }`}
                             >
-                              {camera.is_active ? "● ACTIVE" : "○ INACTIVE"}
+                              {camera.reachable === true ? "● ACTIVE" : camera.reachable === false ? "● CAN'T CONNECT" : "○ UNKNOWN"}
                             </span>
                           </button>
                         ))}

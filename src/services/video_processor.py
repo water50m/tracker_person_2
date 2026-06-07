@@ -164,6 +164,9 @@ class VideoProcessor:
         use_hybrid_tracking: bool = True,
         use_reader_thread: bool = True,  # Use dedicated reader thread for frame capture
         use_async_db_queue: bool = True,  # Use async queue for DB inserts
+        processing_width: Optional[int] = None,  # Resize frame width before AI (None = no resize)
+        auto_frame_skip: bool = False,  # Benchmark first 30 frames to auto-calculate frame_skip
+        target_fps: int = 20,  # Minimum target FPS for auto_frame_skip
     ):
         """
         Initialize VideoProcessor.
@@ -188,6 +191,9 @@ class VideoProcessor:
         self.use_hybrid_tracking = use_hybrid_tracking
         self.use_reader_thread = use_reader_thread
         self.use_async_db_queue = use_async_db_queue
+        self.processing_width = processing_width
+        self.auto_frame_skip = auto_frame_skip
+        self.target_fps = target_fps
         
         # Stats tracking
         self._stats = VideoProcessingStats()
@@ -430,20 +436,15 @@ class VideoProcessor:
         # Update person track_id to our persistent ID
         person.track_id = our_id
         
-        # Store features for future recovery
+        # Store features for future recovery — compute color once per new track here
         if is_new and person_crop is not None and person_crop.size > 0:
             try:
                 from src.ai.color_system import analyze_detailed_colors, get_color_groups
                 detailed_colors = analyze_detailed_colors(person_crop)
                 color_groups = get_color_groups(detailed_colors)
-                
+                clothes = [item.class_name for item in person.items if item.class_name]
                 embedding = person.embedding.tolist() if person.embedding is not None else None
-                clothes = []
-                if embedding is None and embedder is not None:
-                    emb, cloth_names = embedder.get_embedding(person_crop)
-                    embedding = emb.tolist() if emb is not None else None
-                    clothes = cloth_names if cloth_names else []
-                
+
                 self._hybrid_tracker.store_track_features(
                     camera_id=camera_id,
                     our_id=our_id,
@@ -562,7 +563,15 @@ class VideoProcessor:
             self._stats.image_width = width
             self._stats.image_height = height
             
+            # Compute output resolution for AI processing
+            proc_w, proc_h = width, height
+            if self.processing_width and self.processing_width < width:
+                scale = self.processing_width / width
+                proc_w = self.processing_width
+                proc_h = int(height * scale)
+
             print(f"[VideoProcessor] Video: {width}x{height}, FPS: {fps:.2f}, Frames: {total_frames}")
+            print(f"[VideoProcessor] Processing resolution: {proc_w}x{proc_h}")
             print(f"[VideoProcessor] Frame skip: {effective_frame_skip}, Processing ~1/{effective_frame_skip} frames")
             
             # Seek to start frame if resuming
@@ -601,11 +610,41 @@ class VideoProcessor:
                 self._reader_thread = self._start_reader_thread(cap, start_frame, fps, stop_event)
                 print(f"✅ [VideoProcessor] Reader thread started")
             
+            # Auto frame_skip benchmark: process 30 frames and measure throughput
+            if self.auto_frame_skip:
+                bench_frames = 30
+                bench_start = time.perf_counter()
+                bench_cap = cv2.VideoCapture(resolved_source)
+                bench_count = 0
+                while bench_count < bench_frames:
+                    ret_b, frame_b = bench_cap.read()
+                    if not ret_b:
+                        break
+                    if proc_w != width or proc_h != height:
+                        frame_b = cv2.resize(frame_b, (proc_w, proc_h))
+                    try:
+                        await asyncio.wait_for(
+                            self.thread_pool.process_frame(frame_b, frame_number=bench_count, timestamp=time.time()),
+                            timeout=5.0,
+                        )
+                    except Exception:
+                        pass
+                    bench_count += 1
+                bench_cap.release()
+                bench_elapsed = time.perf_counter() - bench_start
+                measured_fps = bench_count / bench_elapsed if bench_elapsed > 0 else fps
+                # frame_skip so AI receives at most measured_fps frames/sec from video
+                auto_skip = max(1, int(fps / max(measured_fps, 1)))
+                effective_frame_skip = auto_skip
+                print(f"[VideoProcessor] Benchmark: {measured_fps:.1f} FPS at {proc_w}x{proc_h} → frame_skip={effective_frame_skip}")
+                if measured_fps < self.target_fps:
+                    print(f"[VideoProcessor] Warning: throughput {measured_fps:.1f} FPS below target {self.target_fps} FPS")
+
             # Process frames
             frame_number = start_frame
             processed_count = 0
             seen_person_ids = set()
-            
+
             # Track last processed frame for reader thread mode
             last_processed_frame = start_frame - effective_frame_skip
             
@@ -646,6 +685,10 @@ class VideoProcessor:
                         frame_number += 1
                         continue
                 
+                # Resize frame for AI processing if needed
+                if (proc_w != width or proc_h != height) and frame is not None:
+                    frame = cv2.resize(frame, (proc_w, proc_h))
+
                 # Process frame with stop event checking
                 try:
                     result = await self._process_frame_with_timeout(
@@ -682,8 +725,6 @@ class VideoProcessor:
                                 if x2 > x and y2 > y:
                                     person_crop = frame[y:y2, x:x2]
                                     self._apply_hybrid_tracking(camera_id, person, person_crop, embedder)
-
-                            self._apply_clothing_votes(person, frame_number)
                             
                             # Call detection callback
                             if on_detection:
@@ -733,6 +774,11 @@ class VideoProcessor:
                                 else:
                                     self._detection_batch.append(detection_data)
                     
+                    # Update lost tracks after all detections processed (our_ids are mapped now)
+                    if self.use_hybrid_tracking and self._hybrid_tracker:
+                        active_our_ids = [p.track_id for p in (result.detections or []) if p.track_id >= 0]
+                        self._hybrid_tracker.update_lost_tracks(camera_id, active_our_ids)
+
                     # Report progress
                     if on_progress and total_frames > 0:
                         percentage = min(100, int((frame_number / total_frames) * 100))

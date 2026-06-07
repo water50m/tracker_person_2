@@ -79,7 +79,7 @@ class HybridTracker:
     Thread-safe for use across multiple cameras.
     """
     
-    def __init__(self, recovery_threshold: float = 0.7):
+    def __init__(self, recovery_threshold: float = 0.65):
         """
         Initialize the HybridTracker.
         
@@ -135,47 +135,57 @@ class HybridTracker:
                 # Known track
                 return state.id_mapping[byte_id], False, False
             
-            # New ByteTrack ID - try to recover from lost tracks
-            if person_crop is not None and person_crop.size > 0 and embedder is not None:
+            # New ByteTrack ID - try to recover from lost tracks.
+            # Recovery is attempted when:
+            #   a) embedder is available (full feature extraction), OR
+            #   b) detailed_colors are pre-computed (color-only recovery)
+            has_features = (
+                (person_crop is not None and person_crop.size > 0 and embedder is not None)
+                or (detailed_colors is not None)
+            )
+            if has_features:
                 try:
-                    # Extract features
-                    if precomputed_embedding is not None:
-                        embedding = precomputed_embedding
-                        clothes = []
-                    else:
-                        embedding, clothes = embedder.get_embedding(person_crop)
-                    
-                    if detailed_colors is None or color_groups is None:
-                        # Compute color features
-                        from src.ai.color_system import analyze_detailed_colors, get_color_groups
-                        detailed_colors = analyze_detailed_colors(person_crop)
-                        color_groups = get_color_groups(detailed_colors)
-                    
+                    embedding = None
+                    clothes = []
+
+                    if embedder is not None and person_crop is not None and person_crop.size > 0:
+                        if precomputed_embedding is not None:
+                            embedding = precomputed_embedding
+                        else:
+                            embedding, clothes = embedder.get_embedding(person_crop)
+
+                    # Use pre-computed colors if provided; recompute only when needed
+                    if (detailed_colors is None or color_groups is None) and state.lost_tracks:
+                        if person_crop is not None and person_crop.size > 0:
+                            from src.ai.color_system import analyze_detailed_colors, get_color_groups
+                            detailed_colors = analyze_detailed_colors(person_crop)
+                            color_groups = get_color_groups(detailed_colors)
+
                     new_features = TrackFeatures(
-                        detailed_colors=detailed_colors,
-                        color_groups=color_groups,
+                        detailed_colors=detailed_colors or {},
+                        color_groups=color_groups or {},
                         embedding=embedding.tolist() if embedding is not None else None,
                         clothes=clothes if clothes else [],
                         last_seen=time.time(),
                     )
-                    
+
                     # Try to match with lost tracks
                     recovered_id = self._match_lost_track(state, new_features)
-                    
+
                     if recovered_id is not None:
                         # Recovered track
                         state.id_mapping[byte_id] = recovered_id
                         del state.lost_tracks[recovered_id]
                         print(f"🔄 [HybridTracker] Track recovered: {recovered_id} (byte_id: {byte_id})")
                         return recovered_id, False, True
-                    
+
                     # New track
                     our_id = state.next_our_id
                     state.id_mapping[byte_id] = our_id
                     state.next_our_id += 1
                     print(f"🆕 [HybridTracker] New track: {our_id} (byte_id: {byte_id})")
                     return our_id, True, False
-                    
+
                 except Exception as e:
                     print(f"⚠️ [HybridTracker] Re-ID matching error: {e}")
                     # Fallback: create new track
@@ -184,7 +194,7 @@ class HybridTracker:
                     state.next_our_id += 1
                     return our_id, True, False
             else:
-                # No embedder or empty crop: create new track
+                # No features available: create new track
                 our_id = state.next_our_id
                 state.id_mapping[byte_id] = our_id
                 state.next_our_id += 1
@@ -227,49 +237,62 @@ class HybridTracker:
         features2: TrackFeatures,
     ) -> float:
         """
-        Calculate similarity between two feature sets.
-        
-        Returns:
-            Similarity score (0-1, higher is more similar)
+        Calculate similarity using weighted color + clothes (+ optional embedding).
+        Weights come from reid config: color_weight, clothes_weight.
         """
-        scores = []
-        
-        # Embedding similarity (cosine)
-        if features1.embedding and features2.embedding:
+        try:
+            from src.config_loader import get_reid_config
+            cfg = get_reid_config()
+        except Exception:
+            cfg = {"use_embedding": False, "color_weight": 0.6, "clothes_weight": 0.4}
+
+        use_embedding = cfg.get("use_embedding", False)
+        color_w = float(cfg.get("color_weight", 0.6))
+        clothes_w = float(cfg.get("clothes_weight", 0.4))
+
+        weighted_sum = 0.0
+        total_weight = 0.0
+
+        # ── Weighted color similarity (cosine on detailed_colors vectors) ──
+        c1 = features1.detailed_colors or {}
+        c2 = features2.detailed_colors or {}
+        if c1 and c2:
+            all_colors = set(c1) | set(c2)
+            dot = sum(c1.get(k, 0.0) * c2.get(k, 0.0) for k in all_colors)
+            norm1 = sum(v ** 2 for v in c1.values()) ** 0.5
+            norm2 = sum(v ** 2 for v in c2.values()) ** 0.5
+            color_sim = dot / (norm1 * norm2) if norm1 > 0 and norm2 > 0 else 0.0
+            weighted_sum += color_w * color_sim
+            total_weight += color_w
+
+        # ── Clothes similarity (Jaccard of class name sets) ──
+        s1 = set(features1.clothes or [])
+        s2 = set(features2.clothes or [])
+        if s1 and s2:
+            inter = len(s1 & s2)
+            union = len(s1 | s2)
+            clothes_sim = inter / union if union > 0 else 0.0
+            weighted_sum += clothes_w * clothes_sim
+            total_weight += clothes_w
+
+        # ── Embedding similarity (cosine) — only when enabled ──
+        if use_embedding and features1.embedding and features2.embedding:
             try:
                 emb1 = np.array(features1.embedding)
                 emb2 = np.array(features2.embedding)
-                
-                # Cosine similarity
-                dot_product = np.dot(emb1, emb2)
+                dot = np.dot(emb1, emb2)
                 norm1 = np.linalg.norm(emb1)
                 norm2 = np.linalg.norm(emb2)
-                
                 if norm1 > 0 and norm2 > 0:
-                    emb_sim = dot_product / (norm1 * norm2)
-                    scores.append(emb_sim)
+                    emb_sim = float(dot / (norm1 * norm2))
+                    # embedding gets equal weight to color+clothes combined
+                    emb_w = total_weight if total_weight > 0 else 1.0
+                    weighted_sum += emb_w * emb_sim
+                    total_weight += emb_w
             except Exception:
                 pass
-        
-        # Color similarity (IoU of color groups)
-        if features1.color_groups and features2.color_groups:
-            try:
-                set1 = set(features1.color_groups.keys())
-                set2 = set(features2.color_groups.keys())
-                
-                if set1 and set2:
-                    intersection = len(set1 & set2)
-                    union = len(set1 | set2)
-                    color_sim = intersection / union if union > 0 else 0.0
-                    scores.append(color_sim)
-            except Exception:
-                pass
-        
-        # Average scores
-        if scores:
-            return sum(scores) / len(scores)
-        
-        return 0.0
+
+        return weighted_sum / total_weight if total_weight > 0 else 0.0
     
     def update_lost_tracks(self, camera_id: str, current_ids: List[int], max_age: int = 30):
         """
@@ -288,21 +311,21 @@ class HybridTracker:
             # Find tracks that are no longer active
             active_ids = set(current_ids)
             
-            # Move inactive tracks to lost_tracks
+            # Move inactive tracks to lost_tracks and remove from active mapping
             for byte_id, our_id in list(state.id_mapping.items()):
                 if our_id not in active_ids:
-                    # Track is lost, store features if available
-                    if our_id in state.track_history:
+                    if our_id not in state.lost_tracks and our_id in state.track_history:
                         history = state.track_history[our_id]
-                        lost_features = TrackFeatures(
+                        state.lost_tracks[our_id] = TrackFeatures(
                             detailed_colors=history.get("detailed_colors", {}),
                             color_groups=history.get("color_groups", {}),
                             embedding=history.get("embedding"),
                             clothes=history.get("clothes", []),
                             last_seen=current_time,
                         )
-                        state.lost_tracks[our_id] = lost_features
                         print(f"💨 [HybridTracker] Track {our_id} marked as lost")
+                    # Remove from active mapping so next appearance triggers re-match
+                    del state.id_mapping[byte_id]
     
     def store_track_features(
         self,

@@ -168,6 +168,9 @@ async def process_video_background_task(
                 save_to_db=save_to_db,
                 save_images=save_images,
                 use_reader_thread=False,
+                processing_width=1280,
+                auto_frame_skip=True,
+                target_fps=20,
             )
 
             stats = await processor.process_video(

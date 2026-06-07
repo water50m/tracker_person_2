@@ -282,16 +282,17 @@ class FrameProcessor:
             frame_number=frame_number,
         )
         
-        # Extract embedding (if enabled)
+        # Extract embedding (if enabled and not disabled by reid config)
         if self.enable_embedding:
             try:
-                embedding, cloth_names = self._get_embedder().get_embedding(
-                    person_crop,
-                    person_embedding=detector_embedding,
-                )
-                person.embedding = embedding
-            except Exception as e:
-                # Embedding failure is not fatal
+                from config_loader import get_reid_config
+                if get_reid_config().get("use_embedding", False):
+                    embedding, cloth_names = self._get_embedder().get_embedding(
+                        person_crop,
+                        person_embedding=detector_embedding,
+                    )
+                    person.embedding = embedding
+            except Exception:
                 pass
         
         # Classify clothing (if enabled)
@@ -353,16 +354,8 @@ class FrameProcessor:
             selection = select_clothing_items(predictions)
             selected_items = selection.items
             
-            # Analyze colors for selected items
-            if self.enable_color_analysis:
-                for item in selected_items:
-                    bbox = item.relative_bbox.to_xyxy() if item.relative_bbox else None
-                    color_start = time.perf_counter()
-                    item = self._analyze_item_color(item, person_crop, bbox)
-                    color_time = (time.perf_counter() - color_start) * 1000
-                    # Log color analysis result
-                    color_str = item.primary_color.color_name if item.primary_color else (item.color_groups[0] if item.color_groups else "Unknown")
-                    _ = color_str  # suppress unused warning
+            # Color analysis is deferred to save time — computed once per new track
+            # in video_processor._apply_hybrid_tracking, not every frame.
 
             return selection
         

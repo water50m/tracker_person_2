@@ -40,11 +40,19 @@
   "processing": {
     "color_remove_background": true
   },
+  "reid": {
+    "use_embedding": false,
+    "color_weight": 0.6,
+    "clothes_weight": 0.4,
+    "recovery_threshold": 0.65
+  },
   "stream": {
     "frame_skip_mode": "none",
     "frame_skip_n": 2,
     "target_fps": 15,
     "buffer_size": 1,
-    "ai_frame_skip": 2
+    "ai_frame_skip": 2,
+    "processing_width": 640,
+    "output_height": 1080
   }
 }

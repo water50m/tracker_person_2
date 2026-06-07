@@ -1,228 +1,192 @@
 """
-LiveFrameProcessor — same pipeline as stream-analyze (YOLO ByteTrack + clothing + ReID + color),
-designed for live RTSP/MJPEG sources.
+LiveStreamPipeline — live RTSP/MJPEG source processing.
 
-Runs blocking work in thread-pool executors so the asyncio event loop stays free.
-Pushes annotated JPEG bytes to an asyncio.Queue for zero-poll-delay MJPEG relay.
+Uses the shared FrameProcessor + HybridTracker (same stack as VideoProcessor)
+so Re-ID, color analysis, and ID assignment are consistent between batch and
+live modes.
+
+Annotated JPEG bytes are pushed to output_queue; on_detection callback is
+called per person per processed frame.
 """
 from __future__ import annotations
 
 import asyncio
-import copy
-import sys
 import time
-import threading
-from collections import defaultdict
-from pathlib import Path
-from types import SimpleNamespace
 from typing import Callable, Optional
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _scripts_path() -> str:
-    return str(Path(__file__).resolve().parents[2] / "scripts")
+_ANNOTATION_PALETTE = [
+    [255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0], [255, 0, 255],
+    [0, 255, 255], [255, 128, 0], [128, 0, 255], [0, 128, 255], [255, 0, 128],
+]
 
 
-def _ensure_scripts_on_path():
-    p = _scripts_path()
-    if p not in sys.path:
-        sys.path.insert(0, p)
+def _id_color(track_id: int) -> list:
+    return _ANNOTATION_PALETTE[track_id % len(_ANNOTATION_PALETTE)]
+
+
+def _to_clothing_dicts(items) -> list:
+    """Convert DetectedItem list → dict list compatible with dashboard_api."""
+    out = []
+    for item in items:
+        d = {
+            "class_name": item.class_name,
+            "confidence": item.confidence,
+            "bbox": None,
+        }
+        if item.detailed_colors:
+            d["detailed_colors"] = item.detailed_colors
+        if item.color_groups:
+            d["color_groups"] = item.color_groups
+        out.append(d)
+    return out
+
+
+def _draw_annotations(frame, persons: list):
+    import cv2
+    annotated = frame.copy()
+    for p in persons:
+        x1, y1, x2, y2 = p["bbox"]
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 255), 2)
+        label = f"ID:{p['id']}"
+        if p.get("stable_label"):
+            label += f" {p['stable_label']}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        y_lbl = y1 - 10
+        cv2.rectangle(annotated, (x1, y_lbl - th - 2), (x1 + tw + 4, y_lbl + 2), (0, 255, 255), -1)
+        cv2.putText(annotated, label, (x1 + 2, y_lbl), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
+    return annotated
 
 
 # ── per-instance state ────────────────────────────────────────────────────────
 
-class _PipelineState:
-    """Holds all mutable per-stream state; lives for the lifetime of one stream."""
+class _LiveState:
+    """
+    Per-camera state for live processing.
+    Uses FrameProcessor + HybridTracker singletons (shared with VideoProcessor).
+    """
 
-    def __init__(self):
-        _ensure_scripts_on_path()
+    def __init__(self, camera_id: str, processing_width: int = 640):
+        from src.services.frame_processor import FrameProcessor
+        from src.services.hybrid_tracker import get_hybrid_tracker
 
-        from src.config_loader import get_detector_model_path, get_classifier_model_path, get_device
-        from src.ai.clothing_predictor import YoloPredictor
-        from pipeline_shared import OnlineReID
-
-        device = get_device()
-
-        from ultralytics import YOLO
-        detector = YOLO(str(Path(get_detector_model_path()).resolve()))
-        detector.to(device)
-
-        classifier = YoloPredictor(get_classifier_model_path())
-
-        reid_args = SimpleNamespace(
-            reid_color_threshold=0.70,
-            reid_confirmation_frames=30,
-            reid_min_hits=10,
-            reid_max_gap_frames=45,
-            reid_aggregate_slot_history=10,
-            disable_reid=False,
+        self.camera_id = camera_id
+        self.processing_width = max(320, processing_width)
+        self.frame_processor = FrameProcessor(
+            enable_classification=True,
+            enable_color_analysis=False,  # color computed once per new track below
+            enable_embedding=True,        # respects reid config use_embedding flag
         )
-
-        self.detector = detector
-        self.classifier = classifier
-        self.device = device
-        self.vote_history: dict = defaultdict(dict)
-        self.clothing_temporal_cache: dict = {}
-        self.detailed_color_cache: dict = {}
-        self.online_reid = OnlineReID(reid_args)
-
-        self.PERSON_CONF = 0.45
-        self.IOU_THRESHOLD = 0.50
-        self.TOP_K = 20
-        self.BATCH_SIZE = 32
-        self.CLOTHING_TEMPORAL_CACHE_FRAMES = 0  # disabled
-
-    # ── per-frame processing (runs in executor thread) ────────────────────────
+        self.hybrid_tracker = get_hybrid_tracker()
 
     def process_frame(self, frame, frame_count: int) -> tuple:
         """
-        Process one frame with the full stream-analyze pipeline.
-        Returns (annotated_frame, persons_list).
+        Process one frame. Returns (annotated_frame, persons_list[dict]).
         Runs synchronously — call via loop.run_in_executor.
         """
-        import cv2
-        _ensure_scripts_on_path()
-        from predict_video_clothing_viewer import (
-            clamp_bbox, dedupe_persons_by_iou, update_track_votes,
-        )
-        from pipeline_shared import (
-            apply_detailed_color_with_cache, class_summary,
-            id_color, profile_from_person,
-        )
-        from src.ai.clothing_predictor import prediction_result
+        import cv2 as _cv2
+        from src.services.ai_processing_types import ProcessingStatus
+        from src.ai.color_system import analyze_detailed_colors, get_color_groups
 
-        h, w = frame.shape[:2]
+        # Resize to processing_width before AI to reduce GPU/CPU load
+        orig_h, orig_w = frame.shape[:2]
+        if orig_w > self.processing_width:
+            scale = self.processing_width / orig_w
+            proc_frame = _cv2.resize(frame, (self.processing_width, int(orig_h * scale)))
+        else:
+            proc_frame = frame
 
-        # ── YOLO + ByteTrack ─────────────────────────────────────────────────
-        result = self.detector.track(
-            frame,
-            persist=True,
-            tracker="bytetrack.yaml",
-            classes=[0],
-            conf=self.PERSON_CONF,
-            imgsz=640,
-            device=self.device,
-            verbose=False,
-        )[0]
+        result = self.frame_processor.process_frame(proc_frame, frame_number=frame_count)
 
         persons = []
-        crop_meta = []
-        boxes = getattr(result, "boxes", None)
-        if boxes is not None and len(boxes) > 0:
-            ids = boxes.id
-            if ids is not None:
-                for i, box in enumerate(boxes):
-                    bbox = clamp_bbox([int(v) for v in box.xyxy[0].tolist()], w, h)
-                    if bbox is None:
-                        continue
-                    track_id = int(ids[i].item())
-                    if track_id < 0:
-                        continue
-                    x1, y1, x2, y2 = bbox
-                    crop = frame[y1:y2, x1:x2]
-                    if crop.size == 0:
-                        continue
-                    person = {
-                        "id": track_id,
-                        "original_id": track_id,
-                        "bbox": [x1, y1, x2, y2],
-                        "confidence": float(box.conf.item()),
-                        "color": id_color(track_id),
-                        "clothing": [],
-                        "raw_clothing": [],
-                        "result_clothing": [],
-                        "stable_clothing": {"label": "", "classes": []},
-                        "stable_label": "",
-                        "label": "",
-                        "reid_profile": {},
-                    }
-                    persons.append(person)
-                    crop_meta.append({"person": person, "crop": crop, "offset": (x1, y1)})
 
-        # ── Clothing classifier + color ───────────────────────────────────────
-        predict_metas, predict_crops = [], []
-        for meta in crop_meta:
-            p = meta["person"]
-            tid = int(p["id"])
-            cached = self.clothing_temporal_cache.get(tid)
-            cache_age = (
-                frame_count - int(cached.get("frame", -(10 ** 9)))
-                if cached else 10 ** 9
-            )
-            if self.CLOTHING_TEMPORAL_CACHE_FRAMES > 0 and cached and cache_age < self.CLOTHING_TEMPORAL_CACHE_FRAMES:
-                raw_items = copy.deepcopy(cached.get("raw_clothing") or [])
-                final_items = copy.deepcopy(cached.get("result_clothing") or [])
-                p["raw_clothing"] = raw_items
-                p["clothing"] = final_items
-                p["result_clothing"] = final_items
-                p["label"] = class_summary(final_items)
-                p["stable_clothing"] = update_track_votes(self.vote_history, p["id"], final_items)
-                p["stable_label"] = p["stable_clothing"]["label"]
-                p["reid_profile"] = profile_from_person(p)
-            else:
-                predict_metas.append(meta)
-                predict_crops.append(meta["crop"])
+        active_our_ids = []
+        bbox_scale = orig_w / proc_frame.shape[1]  # scale factor proc→orig (1.0 if no resize)
 
-        if predict_crops:
-            preds = self.classifier.predict_batch_top_n(predict_crops, self.TOP_K, self.BATCH_SIZE)
-            for meta, top_preds in zip(predict_metas, preds):
-                processed = prediction_result(top_preds, 0.25, "outfit")
-                x_off, y_off = meta["offset"]
-                p = meta["person"]
-                raw_items, final_items = [], []
-                for src_list, tgt_list in (
-                    (processed["raw_detections"], raw_items),
-                    (processed["final_detections"], final_items),
-                ):
-                    for det in src_list:
-                        item = dict(det)
-                        if item.get("bbox"):
-                            cx1, cy1, cx2, cy2 = item["bbox"]
-                            item["bbox"] = clamp_bbox(
-                                [cx1 + x_off, cy1 + y_off, cx2 + x_off, cy2 + y_off], w, h
-                            )
-                        if tgt_list is final_items:
-                            apply_detailed_color_with_cache(
-                                frame, item, w, h,
-                                int(p["id"]), frame_count,
-                                1, self.detailed_color_cache,
-                            )
-                        tgt_list.append(item)
-                p["raw_clothing"] = raw_items
-                p["clothing"] = final_items
-                p["result_clothing"] = final_items
-                p["label"] = class_summary(final_items)
-                p["stable_clothing"] = update_track_votes(self.vote_history, p["id"], final_items)
-                p["stable_label"] = p["stable_clothing"]["label"]
-                p["reid_profile"] = profile_from_person(p)
-                self.clothing_temporal_cache[tid] = {
-                    "frame": frame_count,
-                    "raw_clothing": copy.deepcopy(raw_items),
-                    "result_clothing": copy.deepcopy(final_items),
-                }
+        if result.status == ProcessingStatus.SUCCESS and result.detections:
+            for det in result.detections:
+                byte_id = det.track_id if det.track_id >= 0 else None
+                # Scale bbox coords back to original resolution
+                px1, py1, px2, py2 = det.bbox.to_xyxy()
+                x1 = int(px1 * bbox_scale)
+                y1 = int(py1 * bbox_scale)
+                x2 = int(px2 * bbox_scale)
+                y2 = int(py2 * bbox_scale)
+                x1c = max(0, x1)
+                y1c = max(0, y1)
+                x2c = min(orig_w, x2)
+                y2c = min(orig_h, y2)
+                person_crop = frame[y1c:y2c, x1c:x2c] if x2c > x1c and y2c > y1c else None
 
-        # ── IoU dedup + ReID ──────────────────────────────────────────────────
-        persons = dedupe_persons_by_iou(persons, self.IOU_THRESHOLD)
-        self.online_reid.update(frame_count, persons)
+                # Pre-compute colors so Re-ID matching can use them even without embedder
+                precomp_colors = None
+                precomp_groups = None
+                if person_crop is not None and person_crop.size > 0:
+                    precomp_colors = analyze_detailed_colors(person_crop)
+                    precomp_groups = get_color_groups(precomp_colors)
 
-        # ── Draw annotated frame ──────────────────────────────────────────────
-        annotated = frame.copy()
-        for p in persons:
-            x1, y1, x2, y2 = p["bbox"]
-            stable_items = (p.get("stable_clothing") or {}).get("items") or p.get("result_clothing") or []
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 255), 2)
-            labels = [f"ID:{p['id']}"]
-            if p.get("stable_label"):
-                labels.append(p["stable_label"])
-            y_lbl = y1 - 10
-            for lbl in labels:
-                (tw, th), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-                cv2.rectangle(annotated, (x1, y_lbl - th - 2), (x1 + tw + 4, y_lbl + 2), (0, 255, 255), -1)
-                cv2.putText(annotated, lbl, (x1 + 2, y_lbl), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
-                y_lbl -= (th + 6)
+                # Resolve persistent ID via HybridTracker
+                our_id, is_new, is_recovered = self.hybrid_tracker.match_or_create_track(
+                    camera_id=self.camera_id,
+                    byte_id=byte_id,
+                    person_crop=person_crop,
+                    embedder=None,
+                    detailed_colors=precomp_colors,
+                    color_groups=precomp_groups,
+                )
+                active_our_ids.append(our_id)
 
+                # Store features on first appearance
+                if is_new and precomp_colors is not None:
+                    clothes = [
+                        item.class_name for item in (det.items or [])
+                        if item.class_name
+                    ]
+                    emb = det.embedding.tolist() if det.embedding is not None else None
+                    self.hybrid_tracker.store_track_features(
+                        self.camera_id, our_id,
+                        detailed_colors=precomp_colors,
+                        color_groups=precomp_groups,
+                        embedding=emb,
+                        clothes=clothes,
+                    )
+
+                if is_recovered:
+                    print(f"🔄 [LivePipeline] Track recovered: {our_id} (camera {self.camera_id})")
+
+                # Build output dict (same contract as old pipeline)
+                clothing_items = _to_clothing_dicts(det.items or [])
+                raw_clothing = _to_clothing_dicts(det.raw_items or [])
+                label = ", ".join(
+                    item["class_name"] for item in clothing_items if item.get("class_name")
+                )
+
+                persons.append({
+                    "id": our_id,
+                    "original_id": byte_id if byte_id is not None else our_id,
+                    "bbox": [x1c, y1c, x2c, y2c],
+                    "confidence": det.confidence,
+                    "color": _id_color(our_id),
+                    "clothing": clothing_items,
+                    "raw_clothing": raw_clothing,
+                    "result_clothing": clothing_items,
+                    "stable_clothing": {"label": label, "classes": [], "items": clothing_items},
+                    "stable_label": label,
+                    "label": label,
+                    "reid_profile": {},
+                })
+
+        # Mark disappeared tracks as lost (enables Re-ID on return)
+        # Called unconditionally so tracks are marked lost even when no detections.
+        self.hybrid_tracker.update_lost_tracks(self.camera_id, active_our_ids)
+
+        annotated = _draw_annotations(frame, persons)
         return annotated, persons
+
+    def cleanup(self):
+        self.hybrid_tracker.cleanup(self.camera_id)
 
 
 # ── main pipeline runner ──────────────────────────────────────────────────────
@@ -239,6 +203,8 @@ class LiveStreamPipeline:
         source: str,
         camera_id: str,
         frame_skip: int = 2,
+        processing_width: int = 640,
+        output_height: int = 1080,
         output_queue: Optional[asyncio.Queue] = None,
         on_detection: Optional[Callable] = None,
         stop_event: Optional[asyncio.Event] = None,
@@ -247,6 +213,9 @@ class LiveStreamPipeline:
         self.source = source
         self.camera_id = camera_id
         self.frame_skip = max(1, frame_skip)
+        self.processing_width = max(320, processing_width)
+        # 0 = passthrough (no resize); otherwise cap output height to this value
+        self.output_height = max(0, output_height)
         self.output_queue: asyncio.Queue = output_queue or asyncio.Queue(maxsize=4)
         self.on_detection = on_detection
         self.stop_event = stop_event or asyncio.Event()
@@ -273,7 +242,7 @@ class LiveStreamPipeline:
 
         print(f"[LivePipeline] Initializing models for camera {self.camera_id}…")
         try:
-            state = await run_in_exec(_PipelineState)
+            state = await run_in_exec(_LiveState, self.camera_id, self.processing_width)
         except Exception as e:
             print(f"[LivePipeline] Model init failed: {e}")
             executor.shutdown(wait=False)
@@ -338,6 +307,18 @@ class LiveStreamPipeline:
 
         reader_task = asyncio.create_task(_reader())
 
+        _out_h = self.output_height  # capture for closure
+
+        def _resize_for_output(frame):
+            """Downscale frame to output_height if needed. Never upscales."""
+            if _out_h == 0:
+                return frame
+            h, w = frame.shape[:2]
+            if h <= _out_h:
+                return frame
+            scale = _out_h / h
+            return cv2.resize(frame, (int(w * scale), _out_h), interpolation=cv2.INTER_AREA)
+
         def _push_jpeg(jpeg_bytes: bytes, frame_number: int):
             """Called from executor thread — pushes to output_queue via threadsafe call."""
             try:
@@ -382,7 +363,7 @@ class LiveStreamPipeline:
                     except Exception:
                         pass
 
-            ok, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            ok, jpeg = cv2.imencode(".jpg", _resize_for_output(annotated), [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok:
                 _push_jpeg(jpeg.tobytes(), frame_count)
             else:
@@ -409,7 +390,7 @@ class LiveStreamPipeline:
                     ty = max(y1c - 4, th + 2)
                     cv2.rectangle(annotated, (x1c, ty - th - 2), (x1c + tw + 4, ty + 2), (0, 255, 255), -1)
                     cv2.putText(annotated, text, (x1c + 2, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
-            ok, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            ok, jpeg = cv2.imencode(".jpg", _resize_for_output(annotated), [cv2.IMWRITE_JPEG_QUALITY, 85])
             if ok:
                 _push_jpeg(jpeg.tobytes(), frame_count)
 
@@ -460,6 +441,10 @@ class LiveStreamPipeline:
                 pass
             try:
                 await run_in_exec(cap.release)
+            except Exception:
+                pass
+            try:
+                state.cleanup()
             except Exception:
                 pass
             executor.shutdown(wait=False)

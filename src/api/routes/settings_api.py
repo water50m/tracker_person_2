@@ -63,12 +63,21 @@ class StorageUpdate(BaseModel):
 class ProcessingUpdate(BaseModel):
     color_remove_background: bool | None = None
 
+class ReidUpdate(BaseModel):
+    use_embedding: bool | None = None
+    color_weight: float | None = None
+    clothes_weight: float | None = None
+    recovery_threshold: float | None = None
+
+
 class StreamUpdate(BaseModel):
     frame_skip_mode: str | None = None   # "none" | "fixed" | "auto"
     frame_skip_n: int | None = None
     target_fps: int | None = None
     buffer_size: int | None = None
     ai_frame_skip: int | None = None
+    processing_width: int | None = None  # resize frame to this width before AI (px)
+    output_height: int | None = None     # output JPEG height (0 = passthrough)
 
 class SettingsUpdate(BaseModel):
     paths: PathsUpdate | None = None
@@ -192,6 +201,36 @@ async def list_models():
     duration_ms = (time.perf_counter() - start) * 1000
     print(f"[SETTINGS-TIME] GET /settings/models cache=miss files={len(unique)} duration={duration_ms:.1f}ms", flush=True)
     return _MODELS_CACHE
+
+
+@router.get("/settings/reid")
+async def get_reid_settings():
+    """Return current Re-ID configuration."""
+    from src.config_loader import get_reid_config
+    return get_reid_config()
+
+
+@router.post("/settings/reid")
+async def update_reid_settings(body: ReidUpdate):
+    """Toggle Re-ID embedding and adjust similarity weights."""
+    cfg = load_config()
+    update = body.model_dump(exclude_none=True)
+    if not update:
+        raise HTTPException(status_code=400, detail="No fields provided")
+
+    defaults = {"use_embedding": False, "color_weight": 0.6, "clothes_weight": 0.4, "recovery_threshold": 0.65}
+    current = {**defaults, **cfg.get("reid", {})}
+    current.update(update)
+
+    # Validate weights sum <= 1 when both provided
+    color_w = current.get("color_weight", 0.6)
+    clothes_w = current.get("clothes_weight", 0.4)
+    if color_w + clothes_w > 1.01:
+        raise HTTPException(status_code=400, detail="color_weight + clothes_weight must be <= 1.0")
+
+    cfg["reid"] = current
+    save_config(cfg)
+    return {"status": "saved", "reid": current}
 
 
 @router.post("/settings/models/upload")

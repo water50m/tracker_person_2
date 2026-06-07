@@ -77,6 +77,9 @@ export default function LiveVideoCanvas() {
   const [isStoppingAI, setIsStoppingAI] = useState(false);
   const [frameTiming, setFrameTiming] = useState<string>("");
   const [showAISettings, setShowAISettings] = useState(false);
+  // camera_id → reachability status
+  const [health, setHealth] = useState<Record<string, { reachable: boolean; latency_ms: number | null; checked_at: string; error: string | null }>>({});
+  const [isRechecking, setIsRechecking] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const streamKeyRef = useRef<number>(Date.now()); // Used to force image reload if needed
@@ -124,6 +127,35 @@ export default function LiveVideoCanvas() {
     return () => clearInterval(t);
   }, [fetchCameras]);
 
+  // Fetch camera reachability (backend checks every 10 min)
+  const fetchHealth = useCallback(async () => {
+    try {
+      const res = await fetch("/api/dashboard/camera-health", { cache: "no-store" });
+      if (res.ok) { const data = await res.json(); setHealth(data.health || {}); }
+    } catch { /* silent */ }
+  }, []);
+
+  useEffect(() => {
+    fetchHealth();
+    const t = setInterval(fetchHealth, 60000);
+    return () => clearInterval(t);
+  }, [fetchHealth]);
+
+  // Force an immediate reachability recheck for the selected camera
+  const recheckHealth = useCallback(async () => {
+    if (!selectedCamera) return;
+    setIsRechecking(true);
+    try {
+      const res = await fetch(`/api/dashboard/camera-health/${encodeURIComponent(selectedCamera.id)}/recheck`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.status) setHealth(prev => ({ ...prev, [selectedCamera.id]: data.status }));
+      }
+    } catch { /* silent */ } finally {
+      setIsRechecking(false);
+    }
+  }, [selectedCamera]);
+
   // Fetch latest detections for the selected camera
   useEffect(() => {
     if (!selectedCamera?.is_processing) {
@@ -160,21 +192,19 @@ export default function LiveVideoCanvas() {
     if (!selectedCamera || !selectedCamera.is_processing) return;
 
     setIsStoppingAI(true);
+    const stoppingCameraId = selectedCamera.id;
     try {
-      const res = await fetch(`/api/dashboard/prediction/${selectedCamera.id}/stop`, {
-        method: "POST"
-      });
-      if (res.ok) {
-        setSelectedCamera(prev => prev ? { ...prev, is_processing: false } : null);
-        setCameras(prev => prev.map(c => c.id === selectedCamera.id ? { ...c, is_processing: false } : c));
-        streamKeyRef.current = Date.now();
-        // Confirm state from backend
-        setTimeout(fetchCameras, 800);
-      }
+      const res = await fetch(`/api/dashboard/prediction/${stoppingCameraId}/stop`, { method: "POST" });
+      if (!res.ok) console.warn("Stop returned non-ok:", res.status);
     } catch (err) {
       console.error("Failed to stop prediction:", err);
     } finally {
+      // Always transition UI to stopped — even on network error or 404 (pipeline already stopped)
+      setSelectedCamera(prev => prev ? { ...prev, is_processing: false } : null);
+      setCameras(prev => prev.map(c => c.id === stoppingCameraId ? { ...c, is_processing: false } : c));
+      streamKeyRef.current = Date.now();
       setIsStoppingAI(false);
+      setTimeout(fetchCameras, 500);
     }
   };
 
@@ -243,7 +273,12 @@ export default function LiveVideoCanvas() {
                   onClick={() => handleSelectCamera(cam)}
                   className="w-full flex items-center gap-3 px-3 py-2 hover:bg-cyan-950/40 transition-colors text-left border-b border-cyan-900/20 last:border-0"
                 >
-                  <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${cam.is_active ? "bg-green-500 animate-pulse" : "bg-red-500"}`} />
+                  {(() => {
+                    const h = health[cam.id];
+                    const dotClass = !h ? "bg-slate-600" : h.reachable ? "bg-green-500 animate-pulse" : "bg-red-500";
+                    const title = !h ? "Status unknown" : h.reachable ? `Active${h.latency_ms != null ? ` · ${Math.round(h.latency_ms)}ms` : ""}` : `Can't connect: ${h.error || "no connection"}`;
+                    return <div title={title} className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotClass}`} />;
+                  })()}
                   <div className="flex-1">
                     <div className="font-mono text-[10px] text-slate-300">{cam.name}</div>
                     <div className="font-mono text-[8px] text-slate-600">{cam.id}</div>
@@ -367,10 +402,37 @@ export default function LiveVideoCanvas() {
             <div className="w-full h-full relative">
               {/* Stopping overlay — backend waits for the pipeline to fully finish */}
               {isStoppingAI && (
-                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-slate-950/80 backdrop-blur-sm">
+                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-slate-950">
                   <div className="w-16 h-16 border-4 border-red-500/20 border-t-red-400 rounded-full animate-spin" />
                   <p className="font-mono text-xs text-red-300 tracking-widest animate-pulse">STOPPING AI…</p>
                   <p className="font-mono text-[10px] text-slate-500">finalizing results</p>
+                </div>
+              )}
+
+              {/* Not-ready banner — camera failed the latest reachability check */}
+              {health[selectedCamera.id]?.reachable === false && !isStoppingAI && (
+                <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between gap-3 px-4 py-2 bg-red-950/85 backdrop-blur-sm border-b border-red-700/60">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0 animate-pulse" />
+                    <div className="min-w-0">
+                      <p className="font-mono text-[11px] text-red-300 tracking-widest">CAMERA NOT READY</p>
+                      <p className="font-mono text-[9px] text-red-400/70 truncate">
+                        {health[selectedCamera.id]?.error || "ติดต่อกล้องไม่ได้ — ตรวจสอบการเชื่อมต่อ"}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={recheckHealth}
+                    disabled={isRechecking}
+                    title="Recheck reachability now"
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-sm border border-red-600/60 text-red-300 hover:bg-red-900/40 hover:text-red-200 transition-colors disabled:opacity-50 flex-shrink-0"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className={`w-3 h-3 ${isRechecking ? "animate-spin" : ""}`}>
+                      <path d="M23 4v6h-6M1 20v-6h6" />
+                      <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+                    </svg>
+                    <span className="font-mono text-[9px] tracking-wider">RECONNECT</span>
+                  </button>
                 </div>
               )}
               {(() => {
@@ -456,6 +518,15 @@ export default function LiveVideoCanvas() {
                       src={`/api/dashboard/mjpeg/${selectedCamera.id}`}
                       alt="IP camera relay stream"
                       className="w-full h-full object-contain"
+                      onError={(e) => {
+                        const img = e.currentTarget;
+                        const currentSrc = img.src.split('?')[0];
+                        if (!currentSrc) return;
+                        img.src = '';
+                        setTimeout(() => {
+                          img.src = `${currentSrc}?t=${Date.now()}`;
+                        }, 1500);
+                      }}
                     />
                   );
                 }
@@ -571,7 +642,20 @@ export default function LiveVideoCanvas() {
             `}
           >
             <div className="flex items-center gap-1.5 mb-1">
-              <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${cam.is_active ? "bg-green-500" : "bg-red-600"}`} />
+              {(() => {
+                const h = health[cam.id];
+                const dotClass = !h
+                  ? "bg-slate-600"                       // not checked yet
+                  : h.reachable
+                    ? "bg-green-500 animate-pulse"        // reachable
+                    : "bg-red-500";                       // unreachable
+                const title = !h
+                  ? "Reachability unknown"
+                  : h.reachable
+                    ? `Active${h.latency_ms != null ? ` · ${Math.round(h.latency_ms)}ms` : ""}`
+                    : `Can't connect: ${h.error || "no connection"}`;
+                return <div title={title} className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${dotClass}`} />;
+              })()}
               <span className={`font-mono text-[9px] tracking-wider font-bold ${selectedCamera?.id === cam.id ? "text-cyan-400" : "text-slate-400"}`}>
                 ID: {cam.id}
               </span>
@@ -615,8 +699,16 @@ function LiveTimestamp() {
 }
 
 // ─── AI Settings Modal ────────────────────────────────────────
+const RESOLUTION_OPTIONS = [
+  { label: "480p",  height: 480,  desc: "เบา / bandwidth ต่ำ" },
+  { label: "720p",  height: 720,  desc: "สมดุล (แนะนำ)" },
+  { label: "1080p", height: 1080, desc: "คมชัด / default" },
+  { label: "ต้นฉบับ", height: 0, desc: "ส่งตามขนาดจริงของกล้อง" },
+] as const;
+
 function AISettingsModal({ onClose }: { onClose: () => void }) {
   const [aiFrameSkip, setAiFrameSkip] = useState<number>(5);
+  const [outputHeight, setOutputHeight] = useState<number>(1080);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const backendUrl = (process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000").replace("://localhost:", "://127.0.0.1:");
@@ -627,6 +719,8 @@ function AISettingsModal({ onClose }: { onClose: () => void }) {
       .then((d) => {
         const skip = d?.config?.stream?.ai_frame_skip;
         if (typeof skip === "number") setAiFrameSkip(skip);
+        const oh = d?.config?.stream?.output_height;
+        if (typeof oh === "number") setOutputHeight(oh);
       })
       .catch(() => {});
   }, [backendUrl]);
@@ -638,7 +732,7 @@ function AISettingsModal({ onClose }: { onClose: () => void }) {
       const res = await fetch(`${backendUrl}/api/settings`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ stream: { ai_frame_skip: aiFrameSkip } }),
+        body: JSON.stringify({ stream: { ai_frame_skip: aiFrameSkip, output_height: outputHeight } }),
       });
       setMsg(res.ok ? "✓ SAVED" : "✗ FAILED");
     } catch {
@@ -691,6 +785,37 @@ function AISettingsModal({ onClose }: { onClose: () => void }) {
             <span className="font-mono text-[9px] text-slate-600">N=1 (ทุก frame)</span>
             <span className="font-mono text-[9px] text-slate-600">N=30</span>
           </div>
+        </div>
+
+        {/* Output Resolution */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-mono text-[10px] text-slate-400 tracking-widest uppercase">Output Resolution</span>
+            <span className="font-mono text-lg font-bold text-cyan-400">
+              {RESOLUTION_OPTIONS.find(r => r.height === outputHeight)?.label ?? `${outputHeight}p`}
+            </span>
+          </div>
+          <div className="grid grid-cols-4 gap-1.5">
+            {RESOLUTION_OPTIONS.map((opt) => (
+              <button
+                key={opt.height}
+                onClick={() => setOutputHeight(opt.height)}
+                className={`flex flex-col items-center gap-0.5 py-2 px-1 rounded-sm border transition-all
+                  ${outputHeight === opt.height
+                    ? "border-cyan-500/70 bg-cyan-950/50 text-cyan-300"
+                    : "border-slate-700 bg-slate-900/40 text-slate-400 hover:border-slate-600 hover:text-slate-300"
+                  }`}
+              >
+                <span className="font-mono text-[11px] font-bold">{opt.label}</span>
+                <span className="font-mono text-[8px] text-slate-500 leading-tight text-center">{opt.desc}</span>
+              </button>
+            ))}
+          </div>
+          <p className="font-mono text-[9px] text-slate-600 mt-1.5">
+            {outputHeight === 0
+              ? "ส่งขนาดเต็มของกล้อง — ใช้ bandwidth สูง"
+              : `ลด output เป็น ${outputHeight}p — ไม่ upscale ถ้ากล้อง < ${outputHeight}p`}
+          </p>
         </div>
 
         {/* Info */}
