@@ -425,7 +425,7 @@ class VideoProcessor:
         byte_id = person.track_id if person.track_id >= 0 else None
         
         # Match or create track
-        our_id, is_new, is_recovered = self._hybrid_tracker.match_or_create_track(
+        our_id, is_new, is_recovered, _bt_verified = self._hybrid_tracker.match_or_create_track(
             camera_id=camera_id,
             byte_id=byte_id,
             person_crop=person_crop,
@@ -706,6 +706,8 @@ class VideoProcessor:
                     # Handle detections
                     if result.detections:
                         self._stats.total_detections += len(result.detections)
+                        # collect byte_ids before hybrid tracking remaps them
+                        self._frame_byte_ids = {p.track_id for p in result.detections if p.track_id >= 0}
                         for idx, person in enumerate(result.detections):
                             # Check stop event periodically during detection handling
                             if stop_event and stop_event.is_set():
@@ -778,6 +780,8 @@ class VideoProcessor:
                     if self.use_hybrid_tracking and self._hybrid_tracker:
                         active_our_ids = [p.track_id for p in (result.detections or []) if p.track_id >= 0]
                         self._hybrid_tracker.update_lost_tracks(camera_id, active_our_ids)
+                        # byte_ids were collected before hybrid tracking remapped them (see _frame_byte_ids)
+                        self._hybrid_tracker.update_frame_byte_ids(camera_id, getattr(self, '_frame_byte_ids', set()))
 
                     # Report progress
                     if on_progress and total_frames > 0:

@@ -128,7 +128,7 @@ class _LiveState:
                     precomp_groups = get_color_groups(precomp_colors)
 
                 # Resolve persistent ID via HybridTracker
-                our_id, is_new, is_recovered = self.hybrid_tracker.match_or_create_track(
+                our_id, is_new, is_recovered, _bt_verified = self.hybrid_tracker.match_or_create_track(
                     camera_id=self.camera_id,
                     byte_id=byte_id,
                     person_crop=person_crop,
@@ -181,6 +181,8 @@ class _LiveState:
         # Mark disappeared tracks as lost (enables Re-ID on return)
         # Called unconditionally so tracks are marked lost even when no detections.
         self.hybrid_tracker.update_lost_tracks(self.camera_id, active_our_ids)
+        active_byte_ids = {det.track_id for det in (persons or []) if det.track_id >= 0}
+        self.hybrid_tracker.update_frame_byte_ids(self.camera_id, active_byte_ids)
 
         annotated = _draw_annotations(frame, persons)
         return annotated, persons

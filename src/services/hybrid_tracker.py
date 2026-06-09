@@ -65,6 +65,7 @@ class HybridTrackState:
     next_our_id: int = 1
     track_history: Dict[int, Dict[str, Any]] = field(default_factory=dict)  # {our_id: metadata}
     lock: threading.Lock = field(default_factory=threading.Lock)
+    active_byte_ids: set = field(default_factory=set)  # byte_ids seen last frame
 
 
 class HybridTracker:
@@ -98,6 +99,16 @@ class HybridTracker:
                     self._states[camera_id] = HybridTrackState()
         return self._states[camera_id]
     
+    def update_frame_byte_ids(self, camera_id: str, byte_ids: set):
+        """
+        Call after ALL detections in a frame are processed.
+        Updates which byte_ids were active this frame (used next frame to
+        detect ByteTrack recoveries).
+        """
+        state = self._get_or_create_state(camera_id)
+        with state.lock:
+            state.active_byte_ids = set(byte_ids)
+
     def match_or_create_track(
         self,
         camera_id: str,
@@ -107,10 +118,10 @@ class HybridTracker:
         detailed_colors: Optional[Dict[str, float]] = None,
         color_groups: Optional[Dict[str, float]] = None,
         precomputed_embedding: Optional[np.ndarray] = None,
-    ) -> Tuple[int, bool, bool]:
+    ) -> Tuple[int, bool, bool, Optional[bool]]:
         """
         Match ByteTrack ID to our persistent ID or create new track.
-        
+
         Args:
             camera_id: Camera identifier
             byte_id: ByteTrack ID (can be None)
@@ -118,22 +129,60 @@ class HybridTracker:
             embedder: ClothingEmbedder for feature extraction
             detailed_colors: Color features (if already computed)
             color_groups: Color group features (if already computed)
-        
+
         Returns:
-            Tuple of (our_id, is_new_track, is_recovered_track)
+            Tuple of (our_id, is_new_track, is_recovered_track, bytetrack_verified)
+            bytetrack_verified:
+              None  — ไม่ใช่ ByteTrack recovery (tracking ปกติหรือ new track)
+              True  — ByteTrack recover แล้ว HybridTracker ยืนยัน (score ≥ threshold)
+              False — ByteTrack recover แต่ HybridTracker ปฏิเสธ (score < threshold → new ID)
         """
         state = self._get_or_create_state(camera_id)
-        
+
         with state.lock:
             if byte_id is None:
-                # No tracking ID, create new
                 our_id = state.next_our_id
                 state.next_our_id += 1
-                return our_id, True, False
-            
+                return our_id, True, False, None
+
             if byte_id in state.id_mapping:
-                # Known track
-                return state.id_mapping[byte_id], False, False
+                our_id = state.id_mapping[byte_id]
+
+                # ── ByteTrack recovery detection ──────────────────────────────
+                # byte_id รู้จักแต่ไม่ได้อยู่ใน frame ที่แล้ว → ByteTrack recover เอง
+                if byte_id not in state.active_byte_ids and detailed_colors is not None:
+                    hist = state.track_history.get(our_id, {})
+                    stored = TrackFeatures(
+                        detailed_colors=hist.get("detailed_colors", {}),
+                        color_groups=hist.get("color_groups", {}),
+                        embedding=hist.get("embedding"),
+                        clothes=hist.get("clothes", []),
+                    )
+                    current = TrackFeatures(
+                        detailed_colors=detailed_colors,
+                        color_groups=color_groups or {},
+                        embedding=precomputed_embedding.tolist() if precomputed_embedding is not None else None,
+                        clothes=[],
+                    )
+                    score = self._calculate_similarity(current, stored)
+
+                    if score >= self._recovery_threshold:
+                        print(f"✅ [HybridTracker] ByteTrack recovery CONFIRMED: our_id={our_id} "
+                              f"byte_id={byte_id} score={score:.3f}")
+                        return our_id, False, False, True
+                    else:
+                        # ByteTrack ผิด — สร้าง our_id ใหม่ แต่ยังเก็บ byte_id mapping เดิมไว้
+                        # (ลบ mapping เดิมก่อน แล้ว remap ไปยัง id ใหม่)
+                        del state.id_mapping[byte_id]
+                        new_id = state.next_our_id
+                        state.id_mapping[byte_id] = new_id
+                        state.next_our_id += 1
+                        print(f"❌ [HybridTracker] ByteTrack recovery REJECTED: our_id={our_id}→{new_id} "
+                              f"byte_id={byte_id} score={score:.3f}")
+                        return new_id, True, False, False
+
+                # tracking ปกติ (ต่อเนื่องทุก frame)
+                return our_id, False, False, None
             
             # New ByteTrack ID - try to recover from lost tracks.
             # Recovery is attempted when:
@@ -177,28 +226,27 @@ class HybridTracker:
                         state.id_mapping[byte_id] = recovered_id
                         del state.lost_tracks[recovered_id]
                         print(f"🔄 [HybridTracker] Track recovered: {recovered_id} (byte_id: {byte_id})")
-                        return recovered_id, False, True
+                        return recovered_id, False, True, None
 
                     # New track
                     our_id = state.next_our_id
                     state.id_mapping[byte_id] = our_id
                     state.next_our_id += 1
                     print(f"🆕 [HybridTracker] New track: {our_id} (byte_id: {byte_id})")
-                    return our_id, True, False
+                    return our_id, True, False, None
 
                 except Exception as e:
                     print(f"⚠️ [HybridTracker] Re-ID matching error: {e}")
-                    # Fallback: create new track
                     our_id = state.next_our_id
                     state.id_mapping[byte_id] = our_id
                     state.next_our_id += 1
-                    return our_id, True, False
+                    return our_id, True, False, None
             else:
                 # No features available: create new track
                 our_id = state.next_our_id
                 state.id_mapping[byte_id] = our_id
                 state.next_our_id += 1
-                return our_id, True, False
+                return our_id, True, False, None
     
     def _match_lost_track(
         self,
@@ -253,15 +301,20 @@ class HybridTracker:
         weighted_sum = 0.0
         total_weight = 0.0
 
-        # ── Weighted color similarity (cosine on detailed_colors vectors) ──
+        # ── Color similarity (L1 / Manhattan on normalized distributions) ──
+        # Normalise each to sum=1, then L1_sim = 1 - sum(|p1-p2|)/2
+        # L1_sim ∈ [0,1]: 1=identical, 0=completely different distributions
         c1 = features1.detailed_colors or {}
         c2 = features2.detailed_colors or {}
         if c1 and c2:
+            s1_total = sum(c1.values()) or 1.0
+            s2_total = sum(c2.values()) or 1.0
             all_colors = set(c1) | set(c2)
-            dot = sum(c1.get(k, 0.0) * c2.get(k, 0.0) for k in all_colors)
-            norm1 = sum(v ** 2 for v in c1.values()) ** 0.5
-            norm2 = sum(v ** 2 for v in c2.values()) ** 0.5
-            color_sim = dot / (norm1 * norm2) if norm1 > 0 and norm2 > 0 else 0.0
+            l1 = sum(
+                abs(c1.get(k, 0.0) / s1_total - c2.get(k, 0.0) / s2_total)
+                for k in all_colors
+            )
+            color_sim = float(max(0.0, 1.0 - l1 / 2.0))
             weighted_sum += color_w * color_sim
             total_weight += color_w
 
@@ -275,7 +328,10 @@ class HybridTracker:
             weighted_sum += clothes_w * clothes_sim
             total_weight += clothes_w
 
-        # ── Embedding similarity (cosine) — only when enabled ──
+        # ── Embedding similarity (cosine) ──
+        # use_embedding=True  → compute real cosine similarity
+        # use_embedding=False → treat as 1.0 (embedding not penalised; score driven by color+clothes)
+        emb_w = total_weight if total_weight > 0 else 1.0
         if use_embedding and features1.embedding and features2.embedding:
             try:
                 emb1 = np.array(features1.embedding)
@@ -285,12 +341,11 @@ class HybridTracker:
                 norm2 = np.linalg.norm(emb2)
                 if norm1 > 0 and norm2 > 0:
                     emb_sim = float(dot / (norm1 * norm2))
-                    # embedding gets equal weight to color+clothes combined
-                    emb_w = total_weight if total_weight > 0 else 1.0
                     weighted_sum += emb_w * emb_sim
                     total_weight += emb_w
             except Exception:
                 pass
+        # else: embedding disabled → ไม่นำมาคำนวณ (weight=0) ไม่ inflate score
 
         return weighted_sum / total_weight if total_weight > 0 else 0.0
     
@@ -307,10 +362,8 @@ class HybridTracker:
         
         with state.lock:
             current_time = time.time()
-            
-            # Find tracks that are no longer active
             active_ids = set(current_ids)
-            
+
             # Move inactive tracks to lost_tracks and remove from active mapping
             for byte_id, our_id in list(state.id_mapping.items()):
                 if our_id not in active_ids:
@@ -324,8 +377,14 @@ class HybridTracker:
                             last_seen=current_time,
                         )
                         print(f"💨 [HybridTracker] Track {our_id} marked as lost")
-                    # Remove from active mapping so next appearance triggers re-match
                     del state.id_mapping[byte_id]
+
+            # Remove lost tracks that exceeded max_age (seconds)
+            for our_id, lost_features in list(state.lost_tracks.items()):
+                age = current_time - lost_features.last_seen
+                if age > max_age:
+                    del state.lost_tracks[our_id]
+                    print(f"🗑️ [HybridTracker] Track {our_id} expired after {age:.1f}s")
     
     def store_track_features(
         self,
