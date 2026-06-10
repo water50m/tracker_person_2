@@ -46,6 +46,63 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from services.ai_processing_types import PersonDetection
 
 
+QUALITY_BUFFER_SIZE = 5    # จำนวน frame สูงสุดที่เก็บใน rolling buffer
+QUALITY_MIN_STORE   = 0.5  # quality ต่ำสุดที่จะเพิ่มเข้า buffer
+
+
+def compute_bbox_quality(
+    bbox: Tuple[int, int, int, int],
+    all_bboxes: List[Tuple[int, int, int, int]],
+    frame_w: int,
+    frame_h: int,
+    edge_pad: int = 5,
+) -> float:
+    """คำนวณ quality ของ crop [0,1]: 1=สะอาด/ครบ, 0=แย่มาก"""
+    x1, y1, x2, y2 = bbox
+    bw, bh = x2 - x1, y2 - y1
+    if bw <= 0 or bh <= 0:
+        return 0.0
+
+    in_frame = (x1 >= edge_pad and y1 >= edge_pad
+                and x2 <= frame_w - edge_pad and y2 <= frame_h - edge_pad)
+
+    max_iou = 0.0
+    for ob in all_bboxes:
+        if ob == bbox:
+            continue
+        ox1, oy1, ox2, oy2 = ob
+        ix1, iy1 = max(x1, ox1), max(y1, oy1)
+        ix2, iy2 = min(x2, ox2), min(y2, oy2)
+        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        if inter == 0:
+            continue
+        union = bw * bh + (ox2 - ox1) * (oy2 - oy1) - inter
+        if union > 0:
+            max_iou = max(max_iou, inter / union)
+
+    q = 1.0
+    if not in_frame:
+        q *= 0.6
+    q *= max(0.2, 1.0 - max_iou * 1.5)
+    return round(min(1.0, q), 3)
+
+
+def _merge_color_buffer(buffer: List[Tuple[Dict, float]]) -> Dict[str, float]:
+    """Weighted average ของ color distributions จาก buffer [(colors, quality), ...]"""
+    if not buffer:
+        return {}
+    merged: Dict[str, float] = {}
+    total_w = sum(q for _, q in buffer)
+    if total_w == 0:
+        return {}
+    for colors, q in buffer:
+        s = sum(colors.values()) or 1.0
+        w = q / total_w
+        for k, v in colors.items():
+            merged[k] = merged.get(k, 0.0) + (v / s) * w
+    return merged
+
+
 @dataclass
 class TrackFeatures:
     """Features for a tracked person."""
@@ -55,6 +112,9 @@ class TrackFeatures:
     clothes: List[str] = field(default_factory=list)
     last_seen: float = field(default_factory=time.time)
     frame_number: int = 0
+    last_bbox: Optional[Tuple[int, int, int, int]] = None
+    frame_size: Optional[Tuple[int, int]] = None
+    feature_quality: float = 1.0  # quality ของ stored feature [0,1]
 
 
 @dataclass
@@ -301,19 +361,25 @@ class HybridTracker:
         weighted_sum = 0.0
         total_weight = 0.0
 
-        # ── Color similarity (L1 / Manhattan on normalized distributions) ──
-        # Normalise each to sum=1, then L1_sim = 1 - sum(|p1-p2|)/2
-        # L1_sim ∈ [0,1]: 1=identical, 0=completely different distributions
-        c1 = features1.detailed_colors or {}
-        c2 = features2.detailed_colors or {}
+        # ── Color similarity (quality-weighted L1) ──
+        # ถ้า stored=0% สำหรับสีใด → อาจเป็นเพราะ crop แย่ ไม่ใช่ว่าไม่มีสีนั้นจริง
+        # ปรับ penalty ด้วย stored_quality: Δ_effective = Δ × stored_quality
+        c1 = features1.detailed_colors or {}  # new detection (try recover)
+        c2 = features2.detailed_colors or {}  # stored / lost track
+        stored_quality = max(0.1, features2.feature_quality)
         if c1 and c2:
             s1_total = sum(c1.values()) or 1.0
             s2_total = sum(c2.values()) or 1.0
             all_colors = set(c1) | set(c2)
-            l1 = sum(
-                abs(c1.get(k, 0.0) / s1_total - c2.get(k, 0.0) / s2_total)
-                for k in all_colors
-            )
+            l1 = 0.0
+            for k in all_colors:
+                p1 = c1.get(k, 0.0) / s1_total
+                p2 = c2.get(k, 0.0) / s2_total
+                delta = abs(p1 - p2)
+                # stored=0 และ quality ต่ำ → ลด penalty (ไม่แน่ใจว่าไม่มีสีจริง)
+                if p2 == 0.0:
+                    delta = delta * stored_quality
+                l1 += delta
             color_sim = float(max(0.0, 1.0 - l1 / 2.0))
             weighted_sum += color_w * color_sim
             total_weight += color_w
@@ -329,8 +395,6 @@ class HybridTracker:
             total_weight += clothes_w
 
         # ── Embedding similarity (cosine) ──
-        # use_embedding=True  → compute real cosine similarity
-        # use_embedding=False → treat as 1.0 (embedding not penalised; score driven by color+clothes)
         emb_w = total_weight if total_weight > 0 else 1.0
         if use_embedding and features1.embedding and features2.embedding:
             try:
@@ -345,11 +409,26 @@ class HybridTracker:
                     total_weight += emb_w
             except Exception:
                 pass
-        # else: embedding disabled → ไม่นำมาคำนวณ (weight=0) ไม่ inflate score
+
+        # ── Position similarity (center distance, normalized by frame diagonal) ──
+        # ใช้เป็น tiebreaker weight เล็กน้อย ไม่ใช่ตัวตัดสินหลัก
+        pos_w = float(cfg.get("position_weight", 0.1))
+        b1 = features1.last_bbox
+        b2 = features2.last_bbox
+        fs = features1.frame_size or features2.frame_size
+        if b1 and b2 and fs:
+            cx1 = (b1[0] + b1[2]) / 2.0; cy1 = (b1[1] + b1[3]) / 2.0
+            cx2 = (b2[0] + b2[2]) / 2.0; cy2 = (b2[1] + b2[3]) / 2.0
+            dist = ((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2) ** 0.5
+            diag = (fs[0] ** 2 + fs[1] ** 2) ** 0.5
+            dist_norm = dist / diag if diag > 0 else 1.0
+            pos_sim = max(0.0, 1.0 - dist_norm * 3.0)  # =0 เมื่อ dist > 33% ของ diagonal
+            weighted_sum += pos_w * pos_sim
+            total_weight += pos_w
 
         return weighted_sum / total_weight if total_weight > 0 else 0.0
     
-    def update_lost_tracks(self, camera_id: str, current_ids: List[int], max_age: int = 30):
+    def update_lost_tracks(self, camera_id: str, current_ids: List[int], max_age: float = 2.0):
         """
         Update lost tracks - mark tracks not seen recently as lost.
         
@@ -375,6 +454,9 @@ class HybridTracker:
                             embedding=history.get("embedding"),
                             clothes=history.get("clothes", []),
                             last_seen=current_time,
+                            last_bbox=history.get("last_bbox"),
+                            frame_size=history.get("frame_size"),
+                            feature_quality=history.get("color_quality", history.get("last_quality", 1.0)),
                         )
                         print(f"💨 [HybridTracker] Track {our_id} marked as lost")
                     del state.id_mapping[byte_id]
@@ -394,22 +476,42 @@ class HybridTracker:
         color_groups: Optional[Dict[str, float]] = None,
         embedding: Optional[List[float]] = None,
         clothes: Optional[List[str]] = None,
+        bbox: Optional[Tuple[int, int, int, int]] = None,
+        frame_size: Optional[Tuple[int, int]] = None,
+        quality: float = 1.0,
     ):
-        """Store features for a track."""
+        """Store features for a track. Updates rolling color buffer if quality is high enough."""
         state = self._get_or_create_state(camera_id)
-        
+
         with state.lock:
-            if our_id not in state.track_history:
-                state.track_history[our_id] = {}
-            
-            if detailed_colors is not None:
-                state.track_history[our_id]["detailed_colors"] = detailed_colors
-            if color_groups is not None:
-                state.track_history[our_id]["color_groups"] = color_groups
+            hist = state.track_history.setdefault(our_id, {})
+
             if embedding is not None:
-                state.track_history[our_id]["embedding"] = embedding
+                hist["embedding"] = embedding
             if clothes is not None:
-                state.track_history[our_id]["clothes"] = clothes
+                hist["clothes"] = clothes
+            if bbox is not None:
+                hist["last_bbox"] = bbox
+            if frame_size is not None:
+                hist["frame_size"] = frame_size
+            hist["last_quality"] = quality
+
+            # Rolling color buffer — เก็บเฉพาะ frame ที่ quality สูงพอ
+            if detailed_colors is not None and quality >= QUALITY_MIN_STORE:
+                buf: List = hist.setdefault("color_buffer", [])
+                buf.append((dict(detailed_colors), quality))
+                if len(buf) > QUALITY_BUFFER_SIZE:
+                    buf.pop(0)
+                # Merged colors เป็น weighted average ของ buffer
+                hist["detailed_colors"] = _merge_color_buffer(buf)
+                hist["color_quality"]   = sum(q for _, q in buf) / len(buf)
+            elif detailed_colors is not None and "detailed_colors" not in hist:
+                # ถ้า quality ต่ำแต่ยังไม่มีข้อมูลเลย — เก็บไว้ก่อนด้วย quality ต่ำ
+                hist["detailed_colors"] = detailed_colors
+                hist["color_quality"]   = quality
+
+            if color_groups is not None:
+                hist["color_groups"] = color_groups
     
     def store_image_path(
         self,

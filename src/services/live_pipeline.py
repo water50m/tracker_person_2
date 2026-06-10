@@ -71,6 +71,7 @@ class _LiveState:
     def __init__(self, camera_id: str, processing_width: int = 640):
         from src.services.frame_processor import FrameProcessor
         from src.services.hybrid_tracker import get_hybrid_tracker
+        from src.config_loader import get_reid_config
 
         self.camera_id = camera_id
         self.processing_width = max(320, processing_width)
@@ -80,6 +81,7 @@ class _LiveState:
             enable_embedding=True,        # respects reid config use_embedding flag
         )
         self.hybrid_tracker = get_hybrid_tracker()
+        self._max_lost_age = float(get_reid_config().get("max_lost_age", 2.0))
 
     def process_frame(self, frame, frame_count: int) -> tuple:
         """
@@ -106,21 +108,32 @@ class _LiveState:
         bbox_scale = orig_w / proc_frame.shape[1]  # scale factor proc→orig (1.0 if no resize)
 
         if result.status == ProcessingStatus.SUCCESS and result.detections:
+            from src.services.hybrid_tracker import compute_bbox_quality
+
+            # Pre-collect all bboxes for IoU quality calculation
+            all_bboxes_this_frame = []
+            for det in result.detections:
+                px1, py1, px2, py2 = det.bbox.to_xyxy()
+                _x1c = max(0, int(px1 * bbox_scale))
+                _y1c = max(0, int(py1 * bbox_scale))
+                _x2c = min(orig_w, int(px2 * bbox_scale))
+                _y2c = min(orig_h, int(py2 * bbox_scale))
+                all_bboxes_this_frame.append((_x1c, _y1c, _x2c, _y2c))
+
             for det in result.detections:
                 byte_id = det.track_id if det.track_id >= 0 else None
-                # Scale bbox coords back to original resolution
                 px1, py1, px2, py2 = det.bbox.to_xyxy()
-                x1 = int(px1 * bbox_scale)
-                y1 = int(py1 * bbox_scale)
-                x2 = int(px2 * bbox_scale)
-                y2 = int(py2 * bbox_scale)
-                x1c = max(0, x1)
-                y1c = max(0, y1)
-                x2c = min(orig_w, x2)
-                y2c = min(orig_h, y2)
+                x1 = int(px1 * bbox_scale); y1 = int(py1 * bbox_scale)
+                x2 = int(px2 * bbox_scale); y2 = int(py2 * bbox_scale)
+                x1c = max(0, x1); y1c = max(0, y1)
+                x2c = min(orig_w, x2); y2c = min(orig_h, y2)
                 person_crop = frame[y1c:y2c, x1c:x2c] if x2c > x1c and y2c > y1c else None
 
-                # Pre-compute colors so Re-ID matching can use them even without embedder
+                quality = compute_bbox_quality(
+                    (x1c, y1c, x2c, y2c), all_bboxes_this_frame, orig_w, orig_h
+                )
+
+                # Pre-compute colors
                 precomp_colors = None
                 precomp_groups = None
                 if person_crop is not None and person_crop.size > 0:
@@ -138,20 +151,22 @@ class _LiveState:
                 )
                 active_our_ids.append(our_id)
 
-                # Store features on first appearance
-                if is_new and precomp_colors is not None:
-                    clothes = [
-                        item.class_name for item in (det.items or [])
-                        if item.class_name
-                    ]
-                    emb = det.embedding.tolist() if det.embedding is not None else None
-                    self.hybrid_tracker.store_track_features(
-                        self.camera_id, our_id,
-                        detailed_colors=precomp_colors,
-                        color_groups=precomp_groups,
-                        embedding=emb,
-                        clothes=clothes,
-                    )
+                # Store features — colors updated every frame via rolling buffer
+                clothes = [
+                    item.class_name for item in (det.items or [])
+                    if item.class_name
+                ] if is_new else None
+                emb = det.embedding.tolist() if (is_new and det.embedding is not None) else None
+                self.hybrid_tracker.store_track_features(
+                    self.camera_id, our_id,
+                    detailed_colors=precomp_colors,
+                    color_groups=precomp_groups if is_new else None,
+                    embedding=emb,
+                    clothes=clothes,
+                    bbox=(x1c, y1c, x2c, y2c),
+                    frame_size=(orig_w, orig_h),
+                    quality=quality,
+                )
 
                 if is_recovered:
                     print(f"🔄 [LivePipeline] Track recovered: {our_id} (camera {self.camera_id})")
@@ -180,7 +195,7 @@ class _LiveState:
 
         # Mark disappeared tracks as lost (enables Re-ID on return)
         # Called unconditionally so tracks are marked lost even when no detections.
-        self.hybrid_tracker.update_lost_tracks(self.camera_id, active_our_ids)
+        self.hybrid_tracker.update_lost_tracks(self.camera_id, active_our_ids, max_age=self._max_lost_age)
         active_byte_ids = {det.track_id for det in (persons or []) if det.track_id >= 0}
         self.hybrid_tracker.update_frame_byte_ids(self.camera_id, active_byte_ids)
 

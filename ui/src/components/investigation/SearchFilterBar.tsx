@@ -8,6 +8,8 @@ import { API } from "@/lib/api"; // FastAPI base URL จาก .env.local
 
 interface CameraOption { id: string; name: string; }
 interface VideoOption { id: string; filename: string; camera_id: string; status: string; }
+interface JsonJob { id: string; metadata?: { camera_id?: string; source_video?: string } | null }
+interface DashboardCamera { id: string; name: string; source_url?: string; is_active?: boolean }
 
 // ─── Constants ───────────────────────────────────────────────
 
@@ -172,18 +174,36 @@ export default function SearchFilterBar() {
   const [allVideos, setAllVideos] = useState<VideoOption[]>([]);
 
   useEffect(() => {
-    // ดึง camera_ids ที่มีใน detections — เรียก FastAPI โดยตรง
-    fetch(`${API}/api/video/detections?limit=500`)
+    // ดึง cameras ที่ลงทะเบียนไว้ + merge กับ cameras ที่มี results
+    Promise.all([
+      fetch(`${API}/api/dashboard/cameras`).then((r) => r.json()).catch(() => ({ cameras: [] })),
+      fetch(`${API}/api/json/cameras`).then((r) => r.json()).catch(() => ({ cameras: [] })),
+    ]).then(([dashData, jsonData]) => {
+      const registered: CameraOption[] = (dashData.cameras ?? []).map((c: DashboardCamera) => ({ id: c.id, name: c.name || c.id }));
+      const fromResults: CameraOption[] = (jsonData.cameras ?? []).map((c: { camera_id: string }) => ({ id: c.camera_id, name: c.camera_id }));
+      // merge โดยไม่ซ้ำ
+      const seen = new Set(registered.map((c) => c.id));
+      const merged = [...registered, ...fromResults.filter((c) => !seen.has(c.id))];
+      setCameras(merged);
+    });
+
+    // ดึง jobs แทน videos ใน json mode
+    fetch(`${API}/api/json/jobs?include_metadata=true`)
       .then((r) => r.json())
-      .then((d: any[]) => {
-        const ids = Array.from(new Set(d.map((x) => x.camera_id).filter(Boolean))) as string[];
-        setCameras(ids.map((id) => ({ id, name: id })));
+      .then((d: { jobs?: JsonJob[] }) => {
+        const jobs = d.jobs ?? [];
+        const vids: VideoOption[] = jobs.map((j) => {
+          const src = j.metadata?.source_video ?? "";
+          const filename = src ? src.split(/[\\/]/).pop() ?? j.id : j.id;
+          return {
+            id: j.id,
+            filename,
+            camera_id: j.metadata?.camera_id ?? "",
+            status: "completed",
+          };
+        });
+        setAllVideos(vids);
       })
-      .catch(() => setCameras([]));
-    // ดึงรายการวิดีโอ — เรียก FastAPI โดยตรง
-    fetch(`${API}/api/video/videos`)
-      .then((r) => r.json())
-      .then((d) => setAllVideos(Array.isArray(d) ? d : []))
       .catch(() => setAllVideos([]));
   }, []);
 

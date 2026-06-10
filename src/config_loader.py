@@ -150,6 +150,8 @@ def get_reid_config() -> dict:
         "color_weight": 0.6,
         "clothes_weight": 0.4,
         "recovery_threshold": 0.65,
+        "max_lost_age": 2.0,
+        "position_weight": 0.1,
     }
     return {**defaults, **config.get("reid", {})}
 

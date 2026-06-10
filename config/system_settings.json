@@ -44,7 +44,8 @@
     "use_embedding": false,
     "color_weight": 0.6,
     "clothes_weight": 0.4,
-    "recovery_threshold": 0.65
+    "recovery_threshold": 0.65,
+    "max_lost_age": 2.0
   },
   "stream": {
     "frame_skip_mode": "none",

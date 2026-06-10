@@ -220,6 +220,8 @@ class VideoProcessor:
         self._hybrid_tracker: Optional[HybridTracker] = None
         if self.use_hybrid_tracking:
             self._hybrid_tracker = get_hybrid_tracker()
+            from src.config_loader import get_reid_config as _get_reid
+            self._max_lost_age = float(_get_reid().get("max_lost_age", 2.0))
         
         # Resume state
         self._resume_state: Optional[ResumeState] = None
@@ -405,6 +407,8 @@ class VideoProcessor:
         person,
         person_crop: Optional[np.ndarray],
         embedder,
+        all_bboxes: Optional[List] = None,
+        frame_size: Optional[Tuple[int, int]] = None,
     ) -> int:
         """
         Apply hybrid tracking to get persistent track ID.
@@ -436,25 +440,33 @@ class VideoProcessor:
         # Update person track_id to our persistent ID
         person.track_id = our_id
         
-        # Store features for future recovery — compute color once per new track here
-        if is_new and person_crop is not None and person_crop.size > 0:
-            try:
+        # Store features — colors updated every frame via rolling buffer
+        try:
+            from src.services.hybrid_tracker import compute_bbox_quality
+            b = person.bbox
+            bbox = (int(b.x), int(b.y), int(b.x + b.width), int(b.y + b.height))
+            fw, fh = frame_size if frame_size else (0, 0)
+            quality = compute_bbox_quality(bbox, all_bboxes or [], fw, fh) if fw > 0 else 1.0
+
+            if person_crop is not None and person_crop.size > 0:
                 from src.ai.color_system import analyze_detailed_colors, get_color_groups
                 detailed_colors = analyze_detailed_colors(person_crop)
                 color_groups = get_color_groups(detailed_colors)
-                clothes = [item.class_name for item in person.items if item.class_name]
-                embedding = person.embedding.tolist() if person.embedding is not None else None
-
+                clothes = [item.class_name for item in person.items if item.class_name] if is_new else None
+                embedding = person.embedding.tolist() if (is_new and person.embedding is not None) else None
                 self._hybrid_tracker.store_track_features(
-                    camera_id=camera_id,
-                    our_id=our_id,
-                    detailed_colors=detailed_colors,
-                    color_groups=color_groups,
-                    embedding=embedding,
-                    clothes=clothes,
+                    camera_id=camera_id, our_id=our_id,
+                    detailed_colors=detailed_colors, color_groups=color_groups,
+                    embedding=embedding, clothes=clothes,
+                    bbox=bbox, frame_size=frame_size, quality=quality,
                 )
-            except Exception as e:
-                print(f"⚠️ [HybridTracker] Error storing features: {e}")
+            else:
+                self._hybrid_tracker.store_track_features(
+                    camera_id=camera_id, our_id=our_id,
+                    bbox=bbox, frame_size=frame_size, quality=quality,
+                )
+        except Exception as e:
+            print(f"⚠️ [HybridTracker] Error storing features: {e}")
         
         return our_id
     
@@ -706,27 +718,33 @@ class VideoProcessor:
                     # Handle detections
                     if result.detections:
                         self._stats.total_detections += len(result.detections)
-                        # collect byte_ids before hybrid tracking remaps them
                         self._frame_byte_ids = {p.track_id for p in result.detections if p.track_id >= 0}
+                        fh, fw = frame.shape[:2]
+                        _all_bboxes = [
+                            (max(0,p.bbox.x), max(0,p.bbox.y),
+                             min(fw,p.bbox.x+p.bbox.width), min(fh,p.bbox.y+p.bbox.height))
+                            for p in result.detections if p.bbox
+                        ]
                         for idx, person in enumerate(result.detections):
-                            # Check stop event periodically during detection handling
                             if stop_event and stop_event.is_set():
                                 print(f"[VideoProcessor] Stop requested during detection processing at frame {frame_number}")
                                 self._stats.status = ProcessingStatus.STOPPED
                                 break
-                            # Update stats
                             self._stats.num_persons_detected += 1
                             seen_person_ids.add(person.persistent_id if person.persistent_id is not None else person.track_id)
-                            
+
                             # Apply hybrid tracking if enabled
                             person_crop = None
                             if self.use_hybrid_tracking and person.bbox:
                                 x, y = max(0, person.bbox.x), max(0, person.bbox.y)
-                                x2 = min(frame.shape[1], person.bbox.x + person.bbox.width)
-                                y2 = min(frame.shape[0], person.bbox.y + person.bbox.height)
+                                x2 = min(fw, person.bbox.x + person.bbox.width)
+                                y2 = min(fh, person.bbox.y + person.bbox.height)
                                 if x2 > x and y2 > y:
                                     person_crop = frame[y:y2, x:x2]
-                                    self._apply_hybrid_tracking(camera_id, person, person_crop, embedder)
+                                    self._apply_hybrid_tracking(
+                                        camera_id, person, person_crop, embedder,
+                                        all_bboxes=_all_bboxes, frame_size=(fw, fh),
+                                    )
                             
                             # Call detection callback
                             if on_detection:
@@ -779,7 +797,7 @@ class VideoProcessor:
                     # Update lost tracks after all detections processed (our_ids are mapped now)
                     if self.use_hybrid_tracking and self._hybrid_tracker:
                         active_our_ids = [p.track_id for p in (result.detections or []) if p.track_id >= 0]
-                        self._hybrid_tracker.update_lost_tracks(camera_id, active_our_ids)
+                        self._hybrid_tracker.update_lost_tracks(camera_id, active_our_ids, max_age=getattr(self, '_max_lost_age', 2.0))
                         # byte_ids were collected before hybrid tracking remapped them (see _frame_byte_ids)
                         self._hybrid_tracker.update_frame_byte_ids(camera_id, getattr(self, '_frame_byte_ids', set()))
 
